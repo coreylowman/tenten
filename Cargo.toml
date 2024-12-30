@@ -1,0 +1,9 @@
+[package]
+name = "tenten"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cudarc = { version = "0.12.2", features = ["cuda-12060", "nccl"] }
+half = "2.4.1"
+rand = "0.8.5"
