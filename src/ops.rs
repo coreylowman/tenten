@@ -1,9 +1,13 @@
-use std::{ops::Neg, rc::Rc};
+use std::{
+    cell::RefCell,
+    ops::{Deref, DerefMut, Neg},
+    rc::Rc,
+};
 
 use crate::{build_tensor, cuda::*, dtype::*, tensor::*};
 
 use cudarc::{
-    driver::{DeviceSlice, LaunchAsync},
+    driver::{result::device, DeviceSlice, LaunchAsync},
     nvrtc::compile_ptx,
 };
 use half::{bf16, f16};
@@ -18,7 +22,7 @@ impl From<isize> for Axis {
 }
 
 impl Axis {
-    pub fn get<T: Copy>(&self, dims: &[T]) -> T {
+    pub fn get_value<T: Copy>(&self, dims: &[T]) -> T {
         dims[self.to_usize(dims.len())]
     }
 
@@ -38,16 +42,13 @@ pub fn all_some<T, const N: usize>(arr: [Option<T>; N]) -> Option<[T; N]> {
 impl Tensor {
     #[inline(always)]
     pub fn defer_op(mut self, name: &str, cpu_op: fn(&Scalar) -> Scalar, cuda_op: &str) -> Self {
-        // TODO how will this work - most operations will always hang onto output for gradient, which will make this copy.
-        // I guess that makes sense. but we will have tensor clones everywhere? Do we need another Rc<RefCell<>> around device ptr?
-        let new_cell = Rc::make_mut(&mut self.0);
-        {
-            let mut data = new_cell.borrow_mut();
-            data.deferred_ops.push(DeferredOp {
-                name: name.into(),
-                cpu_op: cpu_op.into(),
-                cuda_op: cuda_op.into(),
-            });
+        self.deferred_ops.push(DeferredOp {
+            name: name.into(),
+            cpu_op: cpu_op.into(),
+            cuda_op: cuda_op.into(),
+        });
+        if let Some(grad) = self.gradient.as_mut() {
+            grad.bytes_ptr = Rc::new(RefCell::new(self.bytes_ptr.borrow().lazy()));
         }
         self
     }
@@ -59,90 +60,17 @@ impl Tensor {
         cpu_op: (fn(&Scalar, &[Scalar]) -> Scalar, Vec<Scalar>),
         cuda_op: CudaOp,
     ) -> Self {
-        let new_cell = Rc::make_mut(&mut self.0);
-        {
-            let mut data = new_cell.borrow_mut();
-            data.deferred_ops.push(DeferredOp {
-                name: name.into(),
-                cpu_op: cpu_op.into(),
-                cuda_op: cuda_op.into(),
-            });
+        self.deferred_ops.push(DeferredOp {
+            name: name.into(),
+            cpu_op: cpu_op.into(),
+            cuda_op: cuda_op.into(),
+        });
+        if let Some(grad) = self.gradient.as_mut() {
+            grad.bytes_ptr = Rc::new(RefCell::new(self.bytes_ptr.borrow().lazy()));
         }
         self
     }
 
-    pub fn undefer(self) -> Result<Self, Error> {
-        if self.0.borrow().deferred_ops.len() == 0 {
-            return Ok(self);
-        }
-
-        {
-            let mut data = self.0.borrow_mut();
-
-            let byte_stride = *data.strides.iter().filter(|&x| *x > 0).min().unwrap();
-            let src_dtype = data.cur_dtype;
-            let dst_dtype = data.deferred_dtype;
-
-            let prog_name = data.get_deferred_program_name();
-            let cpu_prog = data.deferred_ops_cpu_closure();
-            let cuda_prog = data.deffered_ops_cuda_instructions();
-            data.deferred_ops.clear();
-
-            match &mut data.bytes {
-                BytesPtr::Phantom => (),
-                BytesPtr::Cpu(buf) => {
-                    for i in (0..buf.len()).step_by(byte_stride) {
-                        let x = src_dtype.read(&buf[i..]);
-                        let y = cpu_prog(&x);
-                        y.store(&mut buf[i..]);
-                    }
-                }
-                BytesPtr::Cuda(buf) => {
-                    let src_ty = src_dtype.cuda_type_name();
-                    let dst_ty = dst_dtype.cuda_type_name();
-                    let cuda = buf.device();
-
-                    let module_name = std::format!("{prog_name}undefer");
-
-                    if !cuda.has_func(&module_name, "kernel") {
-                        let kernel_src = std::format!(
-                            r#"
-#include "cuda_fp16.h"
-
-extern "C" __global__ void kernel(const size_t *info, const uint8_t *buf) {{
-    const size_t numel = info[0];
-    const size_t byte_stride = info[1];
-    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {{
-        auto x = *static_cast<{src_ty} *>(buf + i * byte_stride);
-        {cuda_prog}
-        *static_cast<{dst_ty} *>(buf + i * byte_stride) = x;
-    }}
-}}
-"#
-                        );
-                        let ptx = compile_ptx(kernel_src).unwrap();
-                        cuda.load_ptx(ptx, &module_name, &["kernel"])?;
-                    }
-
-                    let fwd_fn = cuda.get_func(&module_name, "kernel").unwrap();
-
-                    let numel = buf.len() / byte_stride;
-
-                    let mut info = Vec::with_capacity(2);
-                    info.push(numel);
-                    info.push(byte_stride);
-                    let info = cuda.htod_copy(info)?;
-
-                    unsafe { fwd_fn.launch(launch_cfg::<128>(numel as u32), (&info, buf)) }?;
-                }
-            }
-        }
-
-        Ok(self)
-    }
-}
-
-impl TensorData {
     pub fn get_deferred_program_name(&self) -> String {
         self.deferred_ops
             .iter()
@@ -281,19 +209,15 @@ mod cpu_utils {
 }
 
 impl Tensor {
-    pub fn fill_with_zeros(&self) -> Result<(), Error> {
-        {
-            let mut data = self.0.borrow_mut();
-            match &mut data.bytes {
-                BytesPtr::Phantom => (),
-                BytesPtr::Cpu(vec) => vec.fill(0u8),
-                BytesPtr::Cuda(cuda_slice) => {
-                    let cuda = cuda_slice.device();
-                    cuda.memset_zeros(cuda_slice)?;
-                }
-            }
-            data.deferred_ops.clear();
+    pub fn fill_with_zeros(&mut self) -> Result<(), Error> {
+        match self.bytes_ptr.borrow_mut().deref_mut() {
+            BytesPtr::Phantom => (),
+            BytesPtr::Lazy(_, _) => (),
+            BytesPtr::Cpu(vec) => vec.fill(0),
+            BytesPtr::Cuda(cuda_slice) => cuda_slice.device().memset_zeros(cuda_slice)?,
         }
+        self.stored_dtype = self.deferred_dtype;
+        self.deferred_ops.clear();
         if let Some(x_grad) = self.grad() {
             crate::record_op(move || x_grad.alloc()?.fill_with_zeros());
         }
@@ -310,18 +234,8 @@ impl Tensor {
 }
 
 impl Tensor {
-    pub fn copy(&self, other: Self) -> Result<(), Error> {
-        if self.ptr_eq(&other) {
-            return Ok(());
-        }
-        self.0.borrow_mut().clone_from(&other.0.borrow());
-        Ok(())
-    }
-}
-
-impl Tensor {
     pub fn add(self, other: Self) -> Result<Self, Error> {
-        if self.ptr_eq(&other) {
+        if self.is_same_as(&other) {
             todo!()
         }
 
@@ -329,40 +243,40 @@ impl Tensor {
         assert_eq!(self.device(), other.device());
         assert_eq!(self.dtype(), other.dtype());
 
-        let dtype = self.dtype();
+        let dtype = self.deferred_dtype;
         let numel = self.numel();
         let tensor_num_bytes = numel * dtype.num_bytes();
 
         let z = {
-            let x_data = self.0.borrow();
-            let y_data = other.0.borrow();
+            assert!(self.deferred_dtype.num_bytes() <= self.stored_dtype.num_bytes());
+            assert!(other.deferred_dtype.num_bytes() <= other.stored_dtype.num_bytes());
 
-            assert!(x_data.deferred_dtype.num_bytes() <= x_data.cur_dtype.num_bytes());
-            assert!(y_data.deferred_dtype.num_bytes() <= y_data.cur_dtype.num_bytes());
-
-            let shape = &x_data.shape;
+            let shape = &self.shape;
 
             let z_strides = crate::init::nd_bytes_strides(shape, dtype);
 
-            let bytes = match (&x_data.bytes, &y_data.bytes) {
+            let bytes = match (
+                self.bytes_ptr.borrow().deref(),
+                other.bytes_ptr.borrow().deref(),
+            ) {
                 (BytesPtr::Phantom, BytesPtr::Phantom) => BytesPtr::Phantom,
                 (BytesPtr::Cpu(x_buf), BytesPtr::Cpu(y_buf)) => {
-                    let x_prog = x_data.deferred_ops_cpu_closure();
-                    let y_prog = y_data.deferred_ops_cpu_closure();
+                    let x_prog = self.deferred_ops_cpu_closure();
+                    let y_prog = other.deferred_ops_cpu_closure();
 
                     let mut z_buf = Vec::with_capacity(tensor_num_bytes);
                     z_buf.fill(0);
 
                     let mut x_idx =
-                        cpu_utils::NdIndex::new(shape, &x_data.strides, x_data.cur_dtype);
+                        cpu_utils::NdIndex::new(shape, &self.strides, self.stored_dtype);
                     let mut y_idx =
-                        cpu_utils::NdIndex::new(shape, &y_data.strides, y_data.cur_dtype);
+                        cpu_utils::NdIndex::new(shape, &other.strides, other.stored_dtype);
                     for i_out in 0..numel {
                         let i_lhs = x_idx.next().unwrap();
                         let i_rhs = y_idx.next().unwrap();
 
-                        let x_i = x_data.cur_dtype.read(&x_buf[i_lhs..]);
-                        let y_i = y_data.cur_dtype.read(&y_buf[i_rhs..]);
+                        let x_i = self.stored_dtype.read(&x_buf[i_lhs..]);
+                        let y_i = other.stored_dtype.read(&y_buf[i_rhs..]);
 
                         let x_i = x_prog(&x_i);
                         let y_i = y_prog(&y_i);
@@ -373,11 +287,11 @@ impl Tensor {
                     BytesPtr::Cpu(z_buf)
                 }
                 (BytesPtr::Cuda(x_buf), BytesPtr::Cuda(y_buf)) => {
-                    let x_buf_ty = x_data.cur_dtype.cuda_type_name();
-                    let y_buf_ty = y_data.cur_dtype.cuda_type_name();
+                    let x_buf_ty = self.stored_dtype.cuda_type_name();
+                    let y_buf_ty = other.stored_dtype.cuda_type_name();
                     let dst_ty = dtype.cuda_type_name();
-                    let x_prog = x_data.deffered_ops_cuda_instructions();
-                    let y_prog = y_data.deffered_ops_cuda_instructions();
+                    let x_prog = self.deffered_ops_cuda_instructions();
+                    let y_prog = other.deffered_ops_cuda_instructions();
 
                     let cuda = x_buf.device();
 
@@ -385,8 +299,8 @@ impl Tensor {
 
                     let module_name = std::format!(
                         "{}{}add{}",
-                        x_data.get_deferred_program_name(),
-                        y_data.get_deferred_program_name(),
+                        self.get_deferred_program_name(),
+                        other.get_deferred_program_name(),
                         dtype.short_name()
                     );
 
@@ -435,8 +349,8 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const 
                     info.push(numel);
                     info.push(shape.len());
                     info.extend(shape);
-                    info.extend(&x_data.strides);
-                    info.extend(&y_data.strides);
+                    info.extend(&self.strides);
+                    info.extend(&other.strides);
                     let info = cuda.htod_copy(info)?;
 
                     unsafe {
@@ -473,10 +387,10 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const 
 
 impl Tensor {
     /// NOTE: gradients not traced through this.
-    pub fn add_assign(&self, other: Self) -> Result<(), Error> {
+    pub fn add_assign(&mut self, other: Self) -> Result<(), Error> {
         let _no_grad = crate::backward::no_grad();
 
-        if self.ptr_eq(&other) {
+        if self.is_same_as(&other) {
             todo!()
         }
 
@@ -488,36 +402,35 @@ impl Tensor {
         let numel = self.numel();
 
         {
-            let mut x_data = self.0.borrow_mut();
-            let y_data = other.0.borrow();
+            assert!(self.deferred_dtype.num_bytes() <= self.stored_dtype.num_bytes());
 
-            assert!(x_data.deferred_dtype.num_bytes() <= x_data.cur_dtype.num_bytes());
+            let x_prog_name = self.get_deferred_program_name();
+            let x_cpu_prog = self.deferred_ops_cpu_closure();
+            let x_cuda_prog = self.deffered_ops_cuda_instructions();
+            self.deferred_ops.clear();
 
-            let x_prog_name = x_data.get_deferred_program_name();
-            let x_cpu_prog = x_data.deferred_ops_cpu_closure();
-            let x_cuda_prog = x_data.deffered_ops_cuda_instructions();
-            x_data.deferred_ops.clear();
+            let x_storage_dtype = self.stored_dtype;
+            let x_strides = self.strides.clone();
+            let shape = &self.shape;
 
-            let x_storage_dtype = x_data.cur_dtype;
-            let x_strides = x_data.strides.clone();
-
-            let shape = &y_data.shape;
-
-            match (&mut x_data.bytes, &y_data.bytes) {
+            match (
+                self.bytes_ptr.borrow_mut().deref_mut(),
+                other.bytes_ptr.borrow().deref(),
+            ) {
                 (BytesPtr::Phantom, BytesPtr::Phantom) => (),
                 (BytesPtr::Cpu(x_buf), BytesPtr::Cpu(y_buf)) => {
                     let x_prog = x_cpu_prog;
-                    let y_prog = y_data.deferred_ops_cpu_closure();
+                    let y_prog = other.deferred_ops_cpu_closure();
 
                     let mut x_idx = cpu_utils::NdIndex::new(shape, &x_strides, x_storage_dtype);
                     let mut y_idx =
-                        cpu_utils::NdIndex::new(shape, &y_data.strides, y_data.cur_dtype);
+                        cpu_utils::NdIndex::new(shape, &other.strides, other.stored_dtype);
                     for _ in 0..numel {
                         let i_lhs = x_idx.next().unwrap();
                         let i_rhs = y_idx.next().unwrap();
 
                         let x_i = x_storage_dtype.read(&x_buf[i_lhs..]);
-                        let y_i = y_data.cur_dtype.read(&y_buf[i_rhs..]);
+                        let y_i = other.stored_dtype.read(&y_buf[i_rhs..]);
 
                         let x_i = x_prog(&x_i);
                         let y_i = y_prog(&y_i);
@@ -528,17 +441,17 @@ impl Tensor {
                 }
                 (BytesPtr::Cuda(x_buf), BytesPtr::Cuda(y_buf)) => {
                     let x_buf_ty = x_storage_dtype.cuda_type_name();
-                    let y_buf_ty = y_data.cur_dtype.cuda_type_name();
+                    let y_buf_ty = other.stored_dtype.cuda_type_name();
                     let dst_ty = dtype.cuda_type_name();
                     let x_prog = x_cuda_prog;
-                    let y_prog = y_data.deffered_ops_cuda_instructions();
+                    let y_prog = other.deffered_ops_cuda_instructions();
 
                     let cuda = y_buf.device();
 
                     let module_name = std::format!(
                         "{}{}add_assign{}",
                         x_prog_name,
-                        y_data.get_deferred_program_name(),
+                        other.get_deferred_program_name(),
                         dtype.short_name()
                     );
 
@@ -588,7 +501,7 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const 
                     info.push(shape.len());
                     info.extend(shape);
                     info.extend(&x_strides);
-                    info.extend(&y_data.strides);
+                    info.extend(&other.strides);
                     let info = cuda.htod_copy(info)?;
 
                     unsafe {
@@ -620,8 +533,8 @@ impl Tensor {
 }
 
 impl Tensor {
-    pub fn sub(self, other: Self) -> Result<Self, Error> {
-        if self.ptr_eq(&other) {
+    pub fn sub(mut self, other: Self) -> Result<Self, Error> {
+        if self.is_same_as(&other) {
             self.fill_with_zeros()?;
             Ok(self)
         } else {
@@ -638,9 +551,9 @@ impl Tensor {
 }
 
 impl Tensor {
-    pub fn sub_assign(&self, other: Self) -> Result<(), Error> {
+    pub fn sub_assign(&mut self, other: Self) -> Result<(), Error> {
         let _no_grad = crate::backward::no_grad();
-        if self.ptr_eq(&other) {
+        if self.is_same_as(&other) {
             self.fill_with_zeros()
         } else {
             self.add_assign(other.negate()?)
@@ -650,7 +563,7 @@ impl Tensor {
 
 impl Tensor {
     pub fn mul(self, other: Self) -> Result<Self, Error> {
-        if self.ptr_eq(&other) {
+        if self.is_same_as(&other) {
             return self.square();
         }
 
@@ -664,35 +577,35 @@ impl Tensor {
         let tensor_num_bytes = numel * dtype.num_bytes();
 
         let z = {
-            let x_data = self.0.borrow();
-            let y_data = other.0.borrow();
+            assert!(self.deferred_dtype.num_bytes() <= self.stored_dtype.num_bytes());
+            assert!(other.deferred_dtype.num_bytes() <= other.stored_dtype.num_bytes());
 
-            assert!(x_data.deferred_dtype.num_bytes() <= x_data.cur_dtype.num_bytes());
-            assert!(y_data.deferred_dtype.num_bytes() <= y_data.cur_dtype.num_bytes());
-
-            let shape = &x_data.shape;
+            let shape = &self.shape;
 
             let z_strides = crate::init::nd_bytes_strides(shape, dtype);
 
-            let bytes = match (&x_data.bytes, &y_data.bytes) {
+            let bytes = match (
+                self.bytes_ptr.borrow().deref(),
+                other.bytes_ptr.borrow().deref(),
+            ) {
                 (BytesPtr::Phantom, BytesPtr::Phantom) => BytesPtr::Phantom,
                 (BytesPtr::Cpu(x_buf), BytesPtr::Cpu(y_buf)) => {
-                    let x_prog = x_data.deferred_ops_cpu_closure();
-                    let y_prog = y_data.deferred_ops_cpu_closure();
+                    let x_prog = self.deferred_ops_cpu_closure();
+                    let y_prog = other.deferred_ops_cpu_closure();
 
                     let mut z_buf = Vec::with_capacity(tensor_num_bytes);
                     z_buf.fill(0);
 
                     let mut x_idx =
-                        cpu_utils::NdIndex::new(shape, &x_data.strides, x_data.cur_dtype);
+                        cpu_utils::NdIndex::new(shape, &self.strides, self.stored_dtype);
                     let mut y_idx =
-                        cpu_utils::NdIndex::new(shape, &y_data.strides, x_data.cur_dtype);
+                        cpu_utils::NdIndex::new(shape, &other.strides, self.stored_dtype);
                     for i_out in 0..numel {
                         let i_lhs = x_idx.next().unwrap();
                         let i_rhs = y_idx.next().unwrap();
 
-                        let x_i = x_data.cur_dtype.read(&x_buf[i_lhs..]);
-                        let y_i = y_data.cur_dtype.read(&y_buf[i_rhs..]);
+                        let x_i = self.stored_dtype.read(&x_buf[i_lhs..]);
+                        let y_i = other.stored_dtype.read(&y_buf[i_rhs..]);
 
                         let x_i = x_prog(&x_i);
                         let y_i = y_prog(&y_i);
@@ -703,11 +616,11 @@ impl Tensor {
                     BytesPtr::Cpu(z_buf)
                 }
                 (BytesPtr::Cuda(x_buf), BytesPtr::Cuda(y_buf)) => {
-                    let x_buf_ty = x_data.cur_dtype.cuda_type_name();
-                    let y_buf_ty = y_data.cur_dtype.cuda_type_name();
+                    let x_buf_ty = self.stored_dtype.cuda_type_name();
+                    let y_buf_ty = other.stored_dtype.cuda_type_name();
                     let dst_ty = dtype.cuda_type_name();
-                    let x_prog = x_data.deffered_ops_cuda_instructions();
-                    let y_prog = y_data.deffered_ops_cuda_instructions();
+                    let x_prog = self.deffered_ops_cuda_instructions();
+                    let y_prog = other.deffered_ops_cuda_instructions();
 
                     let cuda = x_buf.device();
 
@@ -715,8 +628,8 @@ impl Tensor {
 
                     let module_name = std::format!(
                         "{}{}mul{}",
-                        x_data.get_deferred_program_name(),
-                        y_data.get_deferred_program_name(),
+                        self.get_deferred_program_name(),
+                        other.get_deferred_program_name(),
                         dtype.short_name()
                     );
 
@@ -765,8 +678,8 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const 
                     info.push(numel);
                     info.push(shape.len());
                     info.extend(shape);
-                    info.extend(&x_data.strides);
-                    info.extend(&y_data.strides);
+                    info.extend(&self.strides);
+                    info.extend(&other.strides);
                     let info = cuda.htod_copy(info)?;
 
                     unsafe {
@@ -821,7 +734,7 @@ impl Tensor {
 
 impl Tensor {
     pub fn div(self, other: Self) -> Result<Self, Error> {
-        if self.ptr_eq(&other) {
+        if self.is_same_as(&other) {
             self.fill_with_ones()?;
             Ok(self)
         } else {
@@ -1280,15 +1193,12 @@ impl Tensor {
             Ok(self)
         } else if dst.num_bytes() <= src.num_bytes() {
             let x = self.clone();
-            let y: Tensor = self.defer_op_with_args(
+            let mut y: Tensor = self.defer_op_with_args(
                 std::format!("to_{}", dst.short_name()),
                 (|x, args| x.to_dtype(args[0].dtype()), vec![dst.zero()]),
                 std::format!("{} x = x", dst.cuda_type_name()),
             );
-            {
-                let mut y_data = y.0.borrow_mut();
-                y_data.deferred_dtype = dst;
-            }
+            y.deferred_dtype = dst;
             if let Some([x_grad, y_grad]) = all_some([x.grad(), y.grad()]) {
                 crate::backward::record_op(move || {
                     x_grad.alloc()?.add_assign(y_grad.to_dtype(src)?)
@@ -1339,38 +1249,30 @@ impl<Tensors: Into<Vec<Tensor>>> ConcatAlong for Tensors {
 impl Tensor {
     pub fn broadcast_along<A: Into<Axis>>(mut self, axis: A, size: usize) -> Result<Self, Error> {
         let axis = Into::<Axis>::into(axis);
-        let new_cell = Rc::make_mut(&mut self.0);
-        {
-            let mut data = new_cell.borrow_mut();
-            let dim = axis.to_usize(data.shape.len() + 1);
-            data.shape.insert(dim, size);
-            data.strides.insert(dim, 0);
-        }
+        let dim = axis.to_usize(self.shape.len() + 1);
+        self.shape.insert(dim, size);
+        self.strides.insert(dim, 0);
         Ok(self)
     }
 
     pub fn broadcast_like<A: Into<Axis>>(mut self, axis: A, other: &Self) -> Result<Self, Error> {
         let axis = Into::<Axis>::into(axis);
         let tgt_shape = other.shape();
-        let new_cell = Rc::make_mut(&mut self.0);
-        {
-            let mut data = new_cell.borrow_mut();
-            let dim = axis.to_usize(data.shape.len() + 1);
-            data.shape.insert(dim, tgt_shape[dim]);
-            data.strides.insert(dim, 0);
-            assert_eq!(
-                data.shape, tgt_shape,
-                "After broadcasting {axis:?}, {:?} does not match {tgt_shape:?}.",
-                data.shape
-            );
-        }
+        let dim = axis.to_usize(self.shape.len() + 1);
+        self.shape.insert(dim, tgt_shape[dim]);
+        self.strides.insert(dim, 0);
+        assert_eq!(
+            self.shape, tgt_shape,
+            "After broadcasting {axis:?}, {:?} does not match {tgt_shape:?}.",
+            self.shape
+        );
         Ok(self)
     }
 }
 
 impl Tensor {
     pub fn permute(mut self, order: &[isize]) -> Result<Self, Error> {
-        let num_dims = self.shape().len();
+        let num_dims = self.shape.len();
 
         assert_eq!(num_dims, order.len());
         let mut dup_found = false;
@@ -1386,19 +1288,15 @@ impl Tensor {
             "Must specify each dimension exactly once in permute command"
         );
 
-        let new_cell = Rc::make_mut(&mut self.0);
-        {
-            let mut data = new_cell.borrow_mut();
-            let mut new_shape = data.shape.clone();
-            let mut new_strides = data.strides.clone();
-            for (i, new_dim) in order.iter().enumerate() {
-                let new_dim = new_dim.rem_euclid(num_dims as isize) as usize;
-                new_strides[i] = new_dim;
-                new_shape[i] = data.shape[new_dim];
-            }
-            data.shape.clone_from(&new_shape);
-            data.strides.clone_from(&new_strides);
+        let mut new_shape = self.shape.clone();
+        let mut new_strides = self.strides.clone();
+        for (i, new_dim) in order.iter().enumerate() {
+            let new_dim = new_dim.rem_euclid(num_dims as isize) as usize;
+            new_strides[i] = new_dim;
+            new_shape[i] = self.shape[new_dim];
         }
+        self.shape = new_shape;
+        self.strides = new_strides;
 
         Ok(self)
     }
@@ -1410,7 +1308,7 @@ impl Tensor {
     }
 
     pub fn contiguous(self) -> Result<Self, Error> {
-        let shape = self.shape();
+        let shape = self.shape.clone();
         self.reshape(shape)
     }
 
@@ -1452,16 +1350,14 @@ impl Tensor {
 impl Tensor {
     pub fn mean_along<A: Into<Axis>>(self, axis: A) -> Result<Self, Error> {
         let axis = Into::<Axis>::into(axis);
-        let shape = self.shape();
-        self.sum_along(axis)?
-            .mul_scalar(1.0f64 / (axis.get(&shape) as f64))
+        let dim = axis.get_value(&self.shape);
+        self.sum_along(axis)?.mul_scalar(1.0f64 / (dim as f64))
     }
 }
 
 impl Tensor {
     pub fn mean(self) -> Result<Self, Error> {
-        let shape = self.shape();
-        let num_elem = shape.iter().product::<usize>();
+        let num_elem = self.numel();
         self.sum()?.mul_scalar(1.0f64 / (num_elem as f64))
     }
 }
@@ -1486,7 +1382,7 @@ impl Tensor {
 
 impl Tensor {
     pub fn min(self, other: Self) -> Result<Self, Error> {
-        if self.ptr_eq(&other) {
+        if self.is_same_as(&other) {
             Ok(self)
         } else {
             // TODO we can optimize this with a special kernel
@@ -1533,7 +1429,7 @@ impl Tensor {
 
 impl Tensor {
     pub fn max(self, other: Self) -> Result<Self, Error> {
-        if self.ptr_eq(&other) {
+        if self.is_same_as(&other) {
             Ok(self)
         } else {
             // TODO we can optimize this with a special kernel
@@ -1579,7 +1475,7 @@ impl Tensor {
 }
 
 impl Tensor {
-    pub fn logsumexp_along<A: Into<Axis>>(self, axis: A) -> Result<Self, Error> {
+    pub fn logsumexp_along<A: Into<Axis>>(mut self, axis: A) -> Result<Self, Error> {
         let axis = axis.into();
 
         let no_grad = crate::backward::no_grad();
@@ -1587,7 +1483,7 @@ impl Tensor {
         self.sub_assign(max.clone().broadcast_like(axis, &self)?)?;
         drop(no_grad);
 
-        let x = self.exp()?.sum_along(axis)?.ln()?;
+        let mut x = self.exp()?.sum_along(axis)?.ln()?;
 
         let no_grad = crate::backward::no_grad();
         x.add_assign(max)?;
@@ -1598,7 +1494,7 @@ impl Tensor {
 }
 
 impl Tensor {
-    pub fn log_softmax_along<A: Into<Axis>>(self, axis: A) -> Result<Self, Error> {
+    pub fn log_softmax_along<A: Into<Axis>>(mut self, axis: A) -> Result<Self, Error> {
         let axis = axis.into();
 
         let no_grad = crate::backward::no_grad();
@@ -1617,7 +1513,7 @@ impl Tensor {
 }
 
 impl Tensor {
-    pub fn softmax_along<A: Into<Axis>>(self, axis: A) -> Result<Self, Error> {
+    pub fn softmax_along<A: Into<Axis>>(mut self, axis: A) -> Result<Self, Error> {
         let axis = axis.into();
 
         let no_grad = crate::backward::no_grad();
@@ -1636,7 +1532,7 @@ impl Tensor {
 
 impl Tensor {
     pub fn dot(self, other: Self) -> Result<Self, Error> {
-        if self.ptr_eq(&other) {
+        if self.is_same_as(&other) {
             todo!()
         }
 
@@ -1670,7 +1566,7 @@ impl Tensor {
 
 impl Tensor {
     pub fn eq(self, other: Self) -> Result<Self, Error> {
-        if self.ptr_eq(&other) {
+        if self.is_same_as(&other) {
             return crate::init::full(self.shape(), true)?.to_device(self.device());
         }
 
@@ -1685,22 +1581,19 @@ impl Tensor {
     pub fn eq_scalar<S: Into<Scalar>>(self, scalar: S) -> Result<Self, Error> {
         let dtype = self.dtype();
         let scalar = Into::<Scalar>::into(scalar).to_dtype(dtype);
-        let y = self.defer_op_with_args(
+        let mut y = self.defer_op_with_args(
             std::format!("eq_{scalar:?}"),
             (|x, args| Scalar::Boolean(*x == args[1]), vec![scalar]),
             std::format!("x == {scalar:?}"),
         );
-        {
-            let mut y_data = y.0.borrow_mut();
-            y_data.deferred_dtype = Dtype::Boolean;
-        }
+        y.deferred_dtype = Dtype::Boolean;
         Ok(y)
     }
 }
 
 impl Tensor {
     pub fn ne(self, other: Self) -> Result<Self, Error> {
-        if self.ptr_eq(&other) {
+        if self.is_same_as(&other) {
             return crate::init::full(self.shape(), false)?.to_device(self.device());
         }
 
@@ -1714,22 +1607,19 @@ impl Tensor {
 impl Tensor {
     pub fn ne_scalar<S: Into<Scalar>>(self, scalar: S) -> Result<Self, Error> {
         let scalar = Into::<Scalar>::into(scalar).to_dtype(self.dtype());
-        let y = self.defer_op_with_args(
+        let mut y = self.defer_op_with_args(
             std::format!("ne_{scalar:?}"),
             (|x, args| Scalar::Boolean(*x != args[1]), vec![scalar]),
             std::format!("x != {scalar:?}"),
         );
-        {
-            let mut y_data = y.0.borrow_mut();
-            y_data.deferred_dtype = Dtype::Boolean;
-        }
+        y.deferred_dtype = Dtype::Boolean;
         Ok(y)
     }
 }
 
 impl Tensor {
     pub fn gt(self, other: Self) -> Result<Self, Error> {
-        if self.ptr_eq(&other) {
+        if self.is_same_as(&other) {
             return crate::init::full(self.shape(), false)?.to_device(self.device());
         }
 
@@ -1744,22 +1634,19 @@ impl Tensor {
 impl Tensor {
     pub fn gt_scalar<S: Into<Scalar>>(self, scalar: S) -> Result<Self, Error> {
         let scalar = Into::<Scalar>::into(scalar).to_dtype(self.dtype());
-        let y = self.defer_op_with_args(
+        let mut y = self.defer_op_with_args(
             std::format!("gt_{scalar:?}"),
             (|x, args| Scalar::Boolean(*x > args[1]), vec![scalar]),
             std::format!("x > {scalar:?}"),
         );
-        {
-            let mut y_data = y.0.borrow_mut();
-            y_data.deferred_dtype = Dtype::Boolean;
-        }
+        y.deferred_dtype = Dtype::Boolean;
         Ok(y)
     }
 }
 
 impl Tensor {
     pub fn ge(self, other: Self) -> Result<Self, Error> {
-        if self.ptr_eq(&other) {
+        if self.is_same_as(&other) {
             return crate::init::full(self.shape(), true)?.to_device(self.device());
         }
 
@@ -1774,22 +1661,19 @@ impl Tensor {
 impl Tensor {
     pub fn ge_scalar<S: Into<Scalar>>(self, scalar: S) -> Result<Self, Error> {
         let scalar = Into::<Scalar>::into(scalar).to_dtype(self.dtype());
-        let y = self.defer_op_with_args(
+        let mut y = self.defer_op_with_args(
             std::format!("ge_{scalar:?}"),
             (|x, args| Scalar::Boolean(*x >= args[1]), vec![scalar]),
             std::format!("x >= {scalar:?}"),
         );
-        {
-            let mut y_data = y.0.borrow_mut();
-            y_data.deferred_dtype = Dtype::Boolean;
-        }
+        y.deferred_dtype = Dtype::Boolean;
         Ok(y)
     }
 }
 
 impl Tensor {
     pub fn lt(self, other: Self) -> Result<Self, Error> {
-        if self.ptr_eq(&other) {
+        if self.is_same_as(&other) {
             return crate::init::full(self.shape(), false)?.to_device(self.device());
         }
 
@@ -1804,22 +1688,19 @@ impl Tensor {
 impl Tensor {
     pub fn lt_scalar<S: Into<Scalar>>(self, scalar: S) -> Result<Self, Error> {
         let scalar = Into::<Scalar>::into(scalar).to_dtype(self.dtype());
-        let y = self.defer_op_with_args(
+        let mut y = self.defer_op_with_args(
             std::format!("lt_scalar_{scalar:?}"),
             (|x, args| Scalar::Boolean(*x < args[1]), vec![scalar]),
             std::format!("x < {scalar:?}"),
         );
-        {
-            let mut y_data = y.0.borrow_mut();
-            y_data.deferred_dtype = Dtype::Boolean;
-        }
+        y.deferred_dtype = Dtype::Boolean;
         Ok(y)
     }
 }
 
 impl Tensor {
     pub fn le(self, other: Self) -> Result<Self, Error> {
-        if self.ptr_eq(&other) {
+        if self.is_same_as(&other) {
             return crate::init::full(self.shape(), true)?.to_device(self.device());
         }
 
@@ -1834,15 +1715,12 @@ impl Tensor {
 impl Tensor {
     pub fn le_scalar<S: Into<Scalar>>(self, scalar: S) -> Result<Self, Error> {
         let scalar = Into::<Scalar>::into(scalar).to_dtype(self.dtype());
-        let y = self.defer_op_with_args(
+        let mut y = self.defer_op_with_args(
             std::format!("le_scalar_{scalar:?}"),
             (|x, args| Scalar::Boolean(*x <= args[1]), vec![scalar]),
             std::format!("x <= {scalar:?}"),
         );
-        {
-            let mut y_data = y.0.borrow_mut();
-            y_data.deferred_dtype = Dtype::Boolean;
-        }
+        y.deferred_dtype = Dtype::Boolean;
         Ok(y)
     }
 }
@@ -1856,7 +1734,7 @@ impl Tensor {
 
 impl Tensor {
     pub fn and(self, other: Self) -> Result<Self, Error> {
-        if self.ptr_eq(&other) {
+        if self.is_same_as(&other) {
             return Ok(self);
         }
 
@@ -1870,7 +1748,7 @@ impl Tensor {
 
 impl Tensor {
     pub fn or(self, other: Self) -> Result<Self, Error> {
-        if self.ptr_eq(&other) {
+        if self.is_same_as(&other) {
             return Ok(self);
         }
 
@@ -1883,8 +1761,8 @@ impl Tensor {
 }
 
 impl Tensor {
-    pub fn xor(self, other: Self) -> Result<Self, Error> {
-        if self.ptr_eq(&other) {
+    pub fn xor(mut self, other: Self) -> Result<Self, Error> {
+        if self.is_same_as(&other) {
             self.fill_with_zeros()?;
             return Ok(self);
         }
@@ -1912,7 +1790,7 @@ impl Tensor {
 
 impl Tensor {
     pub fn choose(self, a: Self, b: Self) -> Result<Self, Error> {
-        if a.ptr_eq(&b) {
+        if a.is_same_as(&b) {
             return Ok(a);
         }
         assert_eq!(self.dtype(), Dtype::Boolean);
@@ -1991,12 +1869,12 @@ impl Tensor {
         assert_eq!(self.shape(), target_probs.shape());
         assert_eq!(self.dtype(), target_probs.dtype());
 
-        let shape = self.shape();
+        let last_dim = *self.shape.last().unwrap();
         self.log_softmax_along(-1)?
             .mul(target_probs)?
             .mean()?
             .negate()?
-            .mul_scalar(*shape.last().unwrap())
+            .mul_scalar(last_dim)
     }
 }
 
@@ -2005,13 +1883,13 @@ impl Tensor {
         assert_eq!(self.shape(), target_probs.shape());
         assert_eq!(self.dtype(), target_probs.dtype());
 
-        let shape = self.shape();
+        let last_dim = *self.shape.last().unwrap();
         self.log_softmax_along(-1)?
             .sub(target_probs.clone().ln()?)?
             .mul(target_probs)?
             .mean()?
             .negate()?
-            .mul_scalar(*shape.last().unwrap())
+            .mul_scalar(last_dim)
     }
 }
 

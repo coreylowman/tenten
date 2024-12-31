@@ -16,29 +16,3 @@ allocation: Allocation {
 # activation checkpointing
 
 rerun forward again in backwards?
-
-# Not keeping x & y in backwards closure JUST for getting access to gradient
-
-- Weak rc ptr?
-- defer_op will clone the inner value if we keep the values this is expensive. defer_op only needs to clone tensor bytes if the bytes change?
-
-
-# Why did we do Tensor(Rc<RefCell<Data>>)?
-
-why not
-
-Tensor {
-    info: {
-        shape,
-        dtype,
-        strides,
-        deferred_ops
-    }
-    bytes: Rc<RefCell<DevicePtr>>,
-    gradient: Rc<RefCell<Gradient>>,
-}
-Gradient {
-    NotRequired,
-    NeedsAllocation(Tensor),
-    Allocated(Tensor)
-}

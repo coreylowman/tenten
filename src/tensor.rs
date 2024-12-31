@@ -1,21 +1,18 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, ops::Deref, rc::Rc};
 
 use cudarc::driver::DeviceSlice;
 
 use crate::dtype::{Dtype, Scalar};
 
 #[derive(Debug, Clone)]
-pub struct Tensor(pub Rc<RefCell<TensorData>>);
-
-#[derive(Debug, Clone)]
-pub struct TensorData {
-    pub(crate) cur_dtype: Dtype,
+pub struct Tensor {
+    pub(crate) stored_dtype: Dtype,
     pub(crate) deferred_dtype: Dtype,
     pub(crate) shape: Vec<usize>,
     pub(crate) strides: Vec<usize>,
-    pub(crate) bytes: BytesPtr, // TODO make this Rc?
+    pub(crate) bytes_ptr: Rc<RefCell<BytesPtr>>,
     pub(crate) deferred_ops: Vec<DeferredOp>,
-    pub(crate) gradient: Option<Tensor>,
+    pub(crate) gradient: Option<Box<Tensor>>,
 }
 
 #[derive(Debug, Clone)]
@@ -31,6 +28,7 @@ pub(crate) fn unique_id() -> UniqueId {
 #[derive(Debug, Clone)]
 pub(crate) enum BytesPtr {
     Phantom,
+    Lazy(Device, usize),
     Cpu(Vec<u8>),
     Cuda(cudarc::driver::CudaSlice<u8>),
 }
@@ -42,14 +40,14 @@ pub enum Device {
     Cuda(usize),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeferredOp {
     pub name: String,
     pub cpu_op: CpuOpPtr,
     pub cuda_op: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CpuOpPtr {
     Simple(fn(&Scalar) -> Scalar),
     WithOptions(fn(&Scalar, &[Scalar]) -> Scalar, Vec<Scalar>),
@@ -67,71 +65,81 @@ impl From<(fn(&Scalar, &[Scalar]) -> Scalar, Vec<Scalar>)> for CpuOpPtr {
     }
 }
 
+impl BytesPtr {
+    pub fn lazy(&self) -> Self {
+        match self {
+            BytesPtr::Phantom => BytesPtr::Phantom,
+            BytesPtr::Lazy(device, len) => BytesPtr::Lazy(*device, *len),
+            BytesPtr::Cpu(vec) => BytesPtr::Lazy(Device::Cpu, vec.len()),
+            BytesPtr::Cuda(cuda_slice) => BytesPtr::Lazy(
+                Device::Cuda(cuda_slice.device().ordinal()),
+                cuda_slice.len(),
+            ),
+        }
+    }
+}
+
 impl Tensor {
     pub fn dtype(&self) -> Dtype {
-        self.0.borrow().deferred_dtype
+        self.deferred_dtype
     }
 
-    pub fn shape(&self) -> Vec<usize> {
-        self.0.borrow().shape.clone()
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
     }
 
-    pub fn strides(&self) -> Vec<usize> {
-        self.0.borrow().strides.clone()
+    pub fn strides(&self) -> &[usize] {
+        &self.strides
     }
 
     pub fn device(&self) -> Device {
-        match &self.0.borrow().bytes {
+        match self.bytes_ptr.borrow().deref() {
             BytesPtr::Phantom => Device::Phantom,
+            BytesPtr::Lazy(device, _) => *device,
             BytesPtr::Cpu(_) => Device::Cpu,
             BytesPtr::Cuda(buf) => Device::Cuda(buf.device().ordinal()),
         }
     }
 
     pub fn requires_grad(&self) -> bool {
-        self.0.borrow().gradient.is_some()
+        self.gradient.is_some()
     }
 
     pub fn numel(&self) -> usize {
-        self.0.borrow().shape.iter().product()
+        self.shape.iter().product()
+    }
+
+    pub fn num_dims(&self) -> usize {
+        self.shape.len()
     }
 
     pub fn grad(&self) -> Option<Tensor> {
-        self.0.borrow().gradient.clone()
+        // here we are cloning deferred ops (which will be empty), shape/strides, dtype. the bytes_ptr is behid a rc so its cheap
+        self.gradient.clone().map(|t| *t)
     }
 
     pub fn alloc(self) -> Result<Self, Error> {
-        todo!()
-    }
-
-    pub fn get_or_alloc_grad(&self) -> Result<Tensor, Error> {
-        let data = self.0.borrow();
-        let grad = data
-            .gradient
-            .clone()
-            .expect("Called get_or_alloc_grad on tensor without gradient");
-        {
-            let mut grad_data = grad.0.borrow_mut();
-            let alloc = match &grad_data.bytes {
-                BytesPtr::Phantom => true,
-                _ => false,
-            };
-            if alloc {
-                grad_data.bytes = match &data.bytes {
-                    BytesPtr::Phantom => BytesPtr::Phantom,
-                    BytesPtr::Cpu(buf) => BytesPtr::Cpu(vec![0; buf.len()]),
-                    BytesPtr::Cuda(buf) => {
-                        let cuda = buf.device();
-                        BytesPtr::Cuda(cuda.alloc_zeros(buf.len())?)
-                    }
-                };
+        let maybe_alloc = match self.bytes_ptr.borrow().deref() {
+            &BytesPtr::Lazy(device, len) => Some((device, len)),
+            _ => None,
+        };
+        let (device, len) = match maybe_alloc {
+            Some((d, l)) => (d, l),
+            None => return Ok(self),
+        };
+        *self.bytes_ptr.borrow_mut() = match device {
+            Device::Phantom => BytesPtr::Phantom,
+            Device::Cpu => BytesPtr::Cpu(vec![0u8; len]),
+            Device::Cuda(ordinal) => {
+                let cuda = crate::cuda::thread_cuda(ordinal);
+                BytesPtr::Cuda(cuda.alloc_zeros(len)?)
             }
-        }
-        Ok(grad)
+        };
+        Ok(self)
     }
 
-    pub fn ptr_eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
+    pub fn is_same_as(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.bytes_ptr, &other.bytes_ptr) && self.deferred_ops == other.deferred_ops
     }
 }
 

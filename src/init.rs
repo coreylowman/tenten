@@ -1,3 +1,5 @@
+use std::ops::Deref;
+use std::os::unix::raw::dev_t;
 use std::{cell::RefCell, rc::Rc};
 
 use cudarc::driver::DeviceSlice;
@@ -64,25 +66,26 @@ pub fn build_tensor(
     bytes: BytesPtr,
     requires_grad: bool,
 ) -> Tensor {
-    Tensor(Rc::new(RefCell::new(TensorData {
-        cur_dtype: dtype,
+    let lazy = bytes.lazy();
+    Tensor {
+        stored_dtype: dtype,
         deferred_dtype: dtype,
         shape: shape.clone(),
         strides: strides.clone(),
-        bytes,
+        bytes_ptr: Rc::new(RefCell::new(bytes)),
         deferred_ops: Vec::new(),
         gradient: requires_grad.then(|| {
-            Tensor(Rc::new(RefCell::new(TensorData {
-                cur_dtype: dtype,
+            Box::new(Tensor {
+                stored_dtype: dtype,
                 deferred_dtype: dtype,
                 shape,
                 strides,
-                bytes: BytesPtr::Phantom,
+                bytes_ptr: Rc::new(RefCell::new(lazy)),
                 deferred_ops: Vec::new(),
                 gradient: None,
-            })))
+            })
         }),
-    })))
+    }
 }
 
 pub fn zeros<Shape>(shape: Shape) -> Result<Tensor, Error>
@@ -99,7 +102,7 @@ where
         Device::Cpu => BytesPtr::Cpu(vec![0; numel]),
         Device::Cuda(dev) => {
             let cuda = crate::cuda::thread_cuda(dev);
-            BytesPtr::Cuda(cuda.dev.alloc_zeros(numel)?)
+            BytesPtr::Cuda(cuda.alloc_zeros(numel)?)
         }
     };
     Ok(build_tensor(
@@ -113,12 +116,16 @@ where
 
 impl Tensor {
     pub fn zeros_like(&self) -> Result<Self, Error> {
-        let data = self.0.borrow();
-        let dtype = data.cur_dtype;
-        let shape = data.shape.clone();
-        let strides = data.strides.clone();
-        let bytes = match &data.bytes {
+        let dtype = self.deferred_dtype;
+        let shape = self.shape.clone();
+        let strides = self.strides.clone();
+        let bytes = match self.bytes_ptr.borrow().deref() {
             BytesPtr::Phantom => BytesPtr::Phantom,
+            &BytesPtr::Lazy(Device::Phantom, _) => BytesPtr::Phantom,
+            &BytesPtr::Lazy(Device::Cpu, len) => BytesPtr::Cpu(vec![0; len]),
+            &BytesPtr::Lazy(Device::Cuda(ordinal), len) => {
+                BytesPtr::Cuda(crate::cuda::thread_cuda(ordinal).alloc_zeros(len)?)
+            }
             BytesPtr::Cpu(src) => BytesPtr::Cpu(vec![0; src.len()]),
             BytesPtr::Cuda(src) => {
                 let cuda = src.device();
@@ -166,7 +173,7 @@ where
         Device::Cpu => BytesPtr::Cpu(vec![0; numel]),
         Device::Cuda(dev) => {
             let cuda = crate::cuda::thread_cuda(dev);
-            BytesPtr::Cuda(cuda.dev.alloc(numel)?)
+            BytesPtr::Cuda(cuda.alloc(numel)?)
         }
     };
     Ok(build_tensor(
@@ -180,12 +187,12 @@ where
 
 impl Tensor {
     pub unsafe fn empty_like(&self) -> Result<Self, Error> {
-        let data = self.0.borrow();
-        let dtype = data.cur_dtype;
-        let shape = data.shape.clone();
-        let strides = data.strides.clone();
-        let bytes = match &data.bytes {
+        let dtype = self.deferred_dtype;
+        let shape = self.shape.clone();
+        let strides = self.strides.clone();
+        let bytes = match self.bytes_ptr.borrow().deref() {
             BytesPtr::Phantom => BytesPtr::Phantom,
+            BytesPtr::Lazy(dev, len) => todo!(),
             BytesPtr::Cpu(src) => BytesPtr::Cpu(vec![0; src.len()]),
             BytesPtr::Cuda(src) => {
                 let cuda = src.device();
@@ -254,8 +261,8 @@ where
     Shape: Into<Vec<usize>>,
 {
     let dtype = match std::any::type_name::<T>() {
-        "Float16" => todo!(),
-        "BFloat16" => todo!(),
+        "half::f16" => Dtype::Float16,
+        "half::bf16" => Dtype::BFloat16,
         "f32" => Dtype::Float32,
         "f64" => Dtype::Float64,
         "i8" => Dtype::Int8,
