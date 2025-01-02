@@ -1,5 +1,4 @@
 use std::ops::Deref;
-use std::os::unix::raw::dev_t;
 use std::{cell::RefCell, rc::Rc};
 
 use cudarc::driver::DeviceSlice;
@@ -42,13 +41,13 @@ impl Default for Device {
 /// ```
 /// assert_eq!(tenten::full_strides(&vec![3, 5, 7]), vec![35, 7, 1]);
 /// ```
-pub fn nd_bytes_strides(shape: &[usize], dtype: Dtype) -> Vec<usize> {
+pub fn nd_bytes_strides(shape: &[usize], byte_stride: usize) -> Vec<usize> {
     let mut strides = Vec::with_capacity(shape.len());
     if shape.len() == 0 {
         return strides;
     }
 
-    let mut last = dtype.num_bytes();
+    let mut last = byte_stride;
     strides.push(1);
 
     for n in shape.iter().skip(1).rev() {
@@ -73,6 +72,7 @@ pub fn build_tensor(
         shape: shape.clone(),
         strides: strides.clone(),
         bytes_ptr: Rc::new(RefCell::new(bytes)),
+        byte_stride: dtype.num_bytes(),
         deferred_ops: Vec::new(),
         gradient: requires_grad.then(|| {
             Box::new(Tensor {
@@ -81,6 +81,7 @@ pub fn build_tensor(
                 shape,
                 strides,
                 bytes_ptr: Rc::new(RefCell::new(lazy)),
+                byte_stride: dtype.num_bytes(),
                 deferred_ops: Vec::new(),
                 gradient: None,
             })
@@ -94,7 +95,7 @@ where
 {
     let shape = Into::<Vec<usize>>::into(shape);
     let dtype: Dtype = Default::default();
-    let strides = nd_bytes_strides(&shape, dtype);
+    let strides = nd_bytes_strides(&shape, dtype.num_bytes());
     let device: Device = Default::default();
     let numel: usize = shape.iter().product();
     let bytes = match device {
@@ -148,7 +149,7 @@ where
 {
     let shape = Into::<Vec<usize>>::into(shape);
     let dtype: Dtype = Default::default();
-    let strides = nd_bytes_strides(&shape, dtype);
+    let strides = nd_bytes_strides(&shape, dtype.num_bytes());
     let device: Device = Default::default();
     todo!()
 }
@@ -165,7 +166,7 @@ where
 {
     let shape = Into::<Vec<usize>>::into(shape);
     let dtype: Dtype = Default::default();
-    let strides = nd_bytes_strides(&shape, dtype);
+    let strides = nd_bytes_strides(&shape, dtype.num_bytes());
     let device: Device = Default::default();
     let numel: usize = shape.iter().product();
     let bytes = match device {
@@ -217,7 +218,7 @@ where
     let shape = Into::<Vec<usize>>::into(shape);
     let value = Into::<Scalar>::into(value);
     let dtype = value.dtype();
-    let strides = nd_bytes_strides(&shape, dtype);
+    let strides = nd_bytes_strides(&shape, dtype.num_bytes());
     let device: Device = Default::default();
     todo!()
 }
@@ -228,7 +229,7 @@ where
 {
     let shape = Into::<Vec<usize>>::into(shape);
     let dtype: Dtype = Default::default();
-    let strides = nd_bytes_strides(&shape, dtype);
+    let strides = nd_bytes_strides(&shape, dtype.num_bytes());
     let device: Device = Default::default();
     todo!()
 }
@@ -245,7 +246,7 @@ where
 {
     let shape = Into::<Vec<usize>>::into(shape);
     let dtype: Dtype = Default::default();
-    let strides = nd_bytes_strides(&shape, dtype);
+    let strides = nd_bytes_strides(&shape, dtype.num_bytes());
     let device: Device = Default::default();
     todo!()
 }
@@ -256,11 +257,8 @@ impl Tensor {
     }
 }
 
-pub fn copy_slice<T, Shape>(buf: &[T], shape: Shape) -> Result<Tensor, Error>
-where
-    Shape: Into<Vec<usize>>,
-{
-    let dtype = match std::any::type_name::<T>() {
+pub fn dtype_of<T>() -> Dtype {
+    match std::any::type_name::<T>() {
         "half::f16" => Dtype::Float16,
         "half::bf16" => Dtype::BFloat16,
         "f32" => Dtype::Float32,
@@ -274,10 +272,60 @@ where
         "u32" => Dtype::UInt32,
         "u64" => Dtype::UInt64,
         not_supported => unimplemented!("unable to handle type {not_supported}"),
-    };
+    }
+}
 
+pub fn copy_slice<T, Shape>(buf: &[T], shape: Shape) -> Result<Tensor, Error>
+where
+    Shape: Into<Vec<usize>>,
+{
+    let dtype = dtype_of::<T>();
     let shape = Into::<Vec<usize>>::into(shape);
-    let strides = nd_bytes_strides(&shape, dtype);
+    let strides = nd_bytes_strides(&shape, dtype.num_bytes());
     let device: Device = Default::default();
     todo!()
+}
+
+impl<T: Into<Scalar>, const M: usize> From<[T; M]> for Tensor {
+    fn from(value: [T; M]) -> Self {
+        let dtype = dtype_of::<T>();
+        let shape = vec![M];
+        let strides = nd_bytes_strides(&shape, dtype.num_bytes());
+        let device: Device = Default::default();
+        todo!()
+    }
+}
+
+impl<T: Into<Scalar>, const M: usize, const N: usize> From<[[T; N]; M]> for Tensor {
+    fn from(value: [[T; N]; M]) -> Self {
+        let dtype = dtype_of::<T>();
+        let shape = vec![M, N];
+        let strides = nd_bytes_strides(&shape, dtype.num_bytes());
+        let device: Device = Default::default();
+        todo!()
+    }
+}
+
+impl<T: Into<Scalar>, const M: usize, const N: usize, const O: usize> From<[[[T; O]; N]; M]>
+    for Tensor
+{
+    fn from(value: [[[T; O]; N]; M]) -> Self {
+        let dtype = dtype_of::<T>();
+        let shape = vec![M, N, O];
+        let strides = nd_bytes_strides(&shape, dtype.num_bytes());
+        let device: Device = Default::default();
+        todo!()
+    }
+}
+
+impl<T: Into<Scalar>, const M: usize, const N: usize, const O: usize, const P: usize>
+    From<[[[[T; P]; O]; N]; M]> for Tensor
+{
+    fn from(value: [[[[T; P]; O]; N]; M]) -> Self {
+        let dtype = dtype_of::<T>();
+        let shape = vec![M, N, O, P];
+        let strides = nd_bytes_strides(&shape, dtype.num_bytes());
+        let device: Device = Default::default();
+        todo!()
+    }
 }

@@ -10,6 +10,7 @@ pub struct Tensor {
     pub(crate) deferred_dtype: Dtype,
     pub(crate) shape: Vec<usize>,
     pub(crate) strides: Vec<usize>,
+    pub(crate) byte_stride: usize,
     pub(crate) bytes_ptr: Rc<RefCell<BytesPtr>>,
     pub(crate) deferred_ops: Vec<DeferredOp>,
     pub(crate) gradient: Option<Box<Tensor>>,
@@ -19,14 +20,14 @@ pub struct Tensor {
 pub struct UniqueId(pub(crate) u64);
 
 #[inline(always)]
-pub(crate) fn unique_id() -> UniqueId {
+pub fn unique_id() -> UniqueId {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     UniqueId(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
 #[non_exhaustive]
 #[derive(Debug, Clone)]
-pub(crate) enum BytesPtr {
+pub enum BytesPtr {
     Phantom,
     Lazy(Device, usize),
     Cpu(Vec<u8>),

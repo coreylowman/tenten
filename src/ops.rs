@@ -123,17 +123,13 @@ mod cpu_utils {
 
     impl<'a> NdIndex<'a> {
         #[inline]
-        pub(crate) fn new(
-            shape: &'a [usize],
-            strides: &'a [usize],
-            dtype: crate::dtype::Dtype,
-        ) -> Self {
+        pub(crate) fn new(shape: &'a [usize], strides: &'a [usize], byte_stride: usize) -> Self {
             Self {
                 indices: Default::default(),
                 shape,
                 strides,
                 next: if shape.len() > 0 { Some(0) } else { None },
-                contiguous: (strides == &crate::init::nd_bytes_strides(shape, dtype))
+                contiguous: (strides == &crate::init::nd_bytes_strides(shape, byte_stride))
                     .then(|| shape.iter().product::<usize>()),
             }
         }
@@ -253,7 +249,7 @@ impl Tensor {
 
             let shape = &self.shape;
 
-            let z_strides = crate::init::nd_bytes_strides(shape, dtype);
+            let z_strides = crate::init::nd_bytes_strides(shape, dtype.num_bytes());
 
             let bytes = match (
                 self.bytes_ptr.borrow().deref(),
@@ -265,12 +261,11 @@ impl Tensor {
                     let y_prog = other.deferred_ops_cpu_closure();
 
                     let mut z_buf = Vec::with_capacity(tensor_num_bytes);
-                    z_buf.fill(0);
+                    z_buf.resize(tensor_num_bytes, 0);
 
-                    let mut x_idx =
-                        cpu_utils::NdIndex::new(shape, &self.strides, self.stored_dtype);
+                    let mut x_idx = cpu_utils::NdIndex::new(shape, &self.strides, self.byte_stride);
                     let mut y_idx =
-                        cpu_utils::NdIndex::new(shape, &other.strides, other.stored_dtype);
+                        cpu_utils::NdIndex::new(shape, &other.strides, other.byte_stride);
                     for i_out in 0..numel {
                         let i_lhs = x_idx.next().unwrap();
                         let i_rhs = y_idx.next().unwrap();
@@ -345,7 +340,7 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const 
 
                     let fwd_fn = cuda.get_func(&module_name, "kernel").unwrap();
 
-                    let mut info = Vec::with_capacity(2 + 3 * shape.len());
+                    let mut info = Vec::new();
                     info.push(numel);
                     info.push(shape.len());
                     info.extend(shape);
@@ -410,6 +405,7 @@ impl Tensor {
             self.deferred_ops.clear();
 
             let x_storage_dtype = self.stored_dtype;
+            let x_byte_stride = self.byte_stride;
             let x_strides = self.strides.clone();
             let shape = &self.shape;
 
@@ -422,9 +418,9 @@ impl Tensor {
                     let x_prog = x_cpu_prog;
                     let y_prog = other.deferred_ops_cpu_closure();
 
-                    let mut x_idx = cpu_utils::NdIndex::new(shape, &x_strides, x_storage_dtype);
+                    let mut x_idx = cpu_utils::NdIndex::new(shape, &x_strides, x_byte_stride);
                     let mut y_idx =
-                        cpu_utils::NdIndex::new(shape, &other.strides, other.stored_dtype);
+                        cpu_utils::NdIndex::new(shape, &other.strides, other.byte_stride);
                     for _ in 0..numel {
                         let i_lhs = x_idx.next().unwrap();
                         let i_rhs = y_idx.next().unwrap();
@@ -496,7 +492,7 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const 
 
                     let fwd_fn = cuda.get_func(&module_name, "kernel").unwrap();
 
-                    let mut info = Vec::with_capacity(2 + 3 * shape.len());
+                    let mut info = Vec::new();
                     info.push(numel);
                     info.push(shape.len());
                     info.extend(shape);
@@ -582,7 +578,7 @@ impl Tensor {
 
             let shape = &self.shape;
 
-            let z_strides = crate::init::nd_bytes_strides(shape, dtype);
+            let z_strides = crate::init::nd_bytes_strides(shape, dtype.num_bytes());
 
             let bytes = match (
                 self.bytes_ptr.borrow().deref(),
@@ -594,12 +590,11 @@ impl Tensor {
                     let y_prog = other.deferred_ops_cpu_closure();
 
                     let mut z_buf = Vec::with_capacity(tensor_num_bytes);
-                    z_buf.fill(0);
+                    z_buf.resize(tensor_num_bytes, 0);
 
-                    let mut x_idx =
-                        cpu_utils::NdIndex::new(shape, &self.strides, self.stored_dtype);
+                    let mut x_idx = cpu_utils::NdIndex::new(shape, &self.strides, self.byte_stride);
                     let mut y_idx =
-                        cpu_utils::NdIndex::new(shape, &other.strides, self.stored_dtype);
+                        cpu_utils::NdIndex::new(shape, &other.strides, other.byte_stride);
                     for i_out in 0..numel {
                         let i_lhs = x_idx.next().unwrap();
                         let i_rhs = y_idx.next().unwrap();
@@ -674,7 +669,7 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const 
 
                     let fwd_fn = cuda.get_func(&module_name, "kernel").unwrap();
 
-                    let mut info = Vec::with_capacity(2 + 3 * shape.len());
+                    let mut info = Vec::new();
                     info.push(numel);
                     info.push(shape.len());
                     info.extend(shape);
@@ -1191,7 +1186,7 @@ impl Tensor {
         let src = self.dtype();
         if src == dst {
             Ok(self)
-        } else if dst.num_bytes() <= src.num_bytes() {
+        } else if dst.num_bytes() <= self.byte_stride {
             let x = self.clone();
             let mut y: Tensor = self.defer_op_with_args(
                 std::format!("to_{}", dst.short_name()),
@@ -1212,8 +1207,9 @@ impl Tensor {
 }
 
 impl Tensor {
-    pub fn to_device(self, device: Device) -> Result<Self, Error> {
+    pub fn to_device(mut self, device: Device) -> Result<Self, Error> {
         // TODO can keep deferred ops and just send existing data to the device
+        // TODO I think we need to do a Rc::make_mut
         todo!()
     }
 }
@@ -1318,14 +1314,118 @@ impl Tensor {
 }
 
 impl Tensor {
-    pub fn sum_along<A: Into<Axis>>(self, axis: A) -> Result<Self, Error> {
-        // A number of cases to handle:
-        // 1. Contiguous
-        // 2. Permuted
-        // 2. Axis is broadcasted
+    pub fn sum_along<A: Into<Axis>>(mut self, axis: A) -> Result<Self, Error> {
         let axis = Into::<Axis>::into(axis);
+        let ax = axis.to_usize(self.shape.len());
         let x = self.clone();
-        let y: Tensor = todo!("forward");
+        let y = if self.shape[ax] == 1 {
+            self.shape.remove(ax);
+            self.strides.remove(ax);
+            self
+        } else if self.strides[ax] == 0 {
+            let scale = self.shape.remove(ax);
+            self.strides.remove(ax);
+            // TODO does this work properly with deferred ops?
+            self.mul_scalar(scale)?
+        } else {
+            let dtype = self.deferred_dtype;
+            let mut shape = self.shape.clone();
+            shape.remove(ax);
+            let strides = crate::init::nd_bytes_strides(&shape, dtype.num_bytes());
+            let y_numel: usize = shape.iter().product();
+            let y_num_bytes = y_numel * dtype.num_bytes();
+            let reduced_dim = self.shape[ax];
+
+            let bytes = match self.bytes_ptr.borrow().deref() {
+                BytesPtr::Cpu(x_buf) => {
+                    let prog = self.deferred_ops_cpu_closure();
+
+                    let mut y_buf = Vec::with_capacity(y_num_bytes);
+                    y_buf.resize(y_num_bytes, 0);
+
+                    let mut idx =
+                        cpu_utils::NdIndex::new(&self.shape, &self.strides, self.byte_stride);
+
+                    for i_y in (0..y_num_bytes).step_by(dtype.num_bytes()) {
+                        // TODO do accumulation in f32 for f16/bf16
+                        let mut y = dtype.zero();
+                        for _ in 0..reduced_dim {
+                            let i_x = idx.next().unwrap();
+                            let x = self.stored_dtype.read(&x_buf[i_x..]);
+                            y = y + prog(&x);
+                        }
+                        y.store(&mut y_buf[i_y..]);
+                    }
+
+                    assert!(idx.next().is_none());
+
+                    BytesPtr::Cpu(y_buf)
+                }
+                BytesPtr::Cuda(x_buf) => {
+                    let cuda = x_buf.device();
+
+                    let prog = self.deffered_ops_cuda_instructions();
+                    let x_buf_ty = self.stored_dtype.cuda_type_name();
+                    let dst_ty = dtype.cuda_type_name();
+
+                    let mut y_buf = cuda.alloc_zeros(y_num_bytes)?;
+
+                    let module_name = std::format!(
+                        "{}sum{ax:?}{}",
+                        self.get_deferred_program_name(),
+                        dtype.short_name()
+                    );
+
+                    if !cuda.has_func(&module_name, "kernel") {
+                        let kernel_src = std::format!(
+                            r#"
+#include "cuda_fp16.h"
+
+extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, uint8_t *out) {{
+    const size_t numel = info[0];
+    const size_t num_dims = info[1];
+    const size_t byte_stride = info[2];
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {{
+        auto x = *static_cast<{x_buf_ty} *>(lhs + i);
+        {prog}
+
+        TODO do sum
+
+        *static_cast<{dst_ty} *>(out + i * byte_stride) = x;
+    }}
+}}
+"#
+                        );
+                        let ptx = compile_ptx(kernel_src).unwrap();
+                        cuda.load_ptx(ptx, &module_name, &["kernel"])?;
+                    }
+
+                    let fwd_fn = cuda.get_func(&module_name, "kernel").unwrap();
+
+                    let mut info = Vec::new();
+                    info.push(y_numel);
+                    let info = cuda.htod_copy(info)?;
+
+                    unsafe {
+                        fwd_fn.launch(
+                            launch_cfg::<128>(y_numel as u32),
+                            (&info, x_buf, &mut y_buf),
+                        )
+                    }?;
+
+                    BytesPtr::Cuda(y_buf)
+                }
+                _ => unimplemented!(),
+            };
+
+            build_tensor(
+                dtype,
+                shape,
+                strides,
+                bytes,
+                self.requires_grad() && crate::backward::is_recording(),
+            )
+        };
         if let Some([x_grad, y_grad]) = all_some([x.grad(), y.grad()]) {
             crate::backward::record_op(move || {
                 let y_grad = y_grad.broadcast_like(axis, &x_grad)?;
@@ -1338,11 +1438,11 @@ impl Tensor {
 
 impl Tensor {
     pub fn sum(mut self) -> Result<Self, Error> {
-        let shape = self.shape();
-        for _ in 0..shape.len() {
+        // TODO optimize this into one call. if we can do sum_along in place that'd be great
+        for _ in 0..self.shape.len() {
             self = self.sum_along(-1)?;
         }
-        assert_eq!(self.shape(), vec![]);
+        assert_eq!(self.shape, vec![]);
         Ok(self)
     }
 }

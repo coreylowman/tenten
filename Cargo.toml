@@ -10,3 +10,9 @@ rand = "0.8.5"
 
 [features]
 cudnn = ["cudarc/cudnn"]
+test-phantom = []
+test-cpu = []
+test-cuda = []
+test-f16 = []
+test-bf16 = []
+test-f32 = []
