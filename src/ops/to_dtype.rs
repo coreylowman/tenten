@@ -8,7 +8,7 @@ impl Tensor {
         } else if dst.num_bytes() <= self.byte_stride {
             let x = self.clone();
             let mut y: Tensor = self.defer_op_with_args(
-                std::format!("to_{}", dst.short_name()),
+                std::format!("to{}", dst.short_name()),
                 (|x, args| x.to_dtype(args[0].dtype()), vec![dst.zero()]),
                 std::format!("{} x = x", dst.cuda_type_name()),
             );

@@ -1,4 +1,4 @@
-use crate::tensor::{Error, Tensor};
+use crate::tensor::{Dtype, Error, Tensor};
 
 impl Tensor {
     pub fn div(mut self, other: Self) -> Result<Self, Error> {
@@ -6,8 +6,12 @@ impl Tensor {
             self.fill_with(self.dtype().one())?;
             Ok(self)
         } else {
-            // TODO handle integer values
-            self.mul(other.recip()?)
+            match self.dtype() {
+                Dtype::Float16 | Dtype::BFloat16 | Dtype::Float32 | Dtype::Float64 => {
+                    self.mul(other.recip()?)
+                }
+                _ => todo!(),
+            }
         }
     }
 }

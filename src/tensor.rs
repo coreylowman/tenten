@@ -181,6 +181,7 @@ pub enum Dtype {
 }
 
 impl Dtype {
+    #[inline(always)]
     pub fn short_name(&self) -> &str {
         match self {
             Dtype::Boolean => "bool",
@@ -199,6 +200,7 @@ impl Dtype {
         }
     }
 
+    #[inline(always)]
     pub fn cuda_type_name(&self) -> &str {
         match self {
             Dtype::Boolean => "bool",
@@ -217,6 +219,7 @@ impl Dtype {
         }
     }
 
+    #[inline(always)]
     pub fn num_bytes(&self) -> usize {
         match self {
             Dtype::Boolean => 1,
@@ -235,6 +238,7 @@ impl Dtype {
         }
     }
 
+    #[inline(always)]
     pub fn read(&self, buf: &[u8]) -> Scalar {
         match self {
             Dtype::Boolean => Scalar::Boolean(buf[0] == 1),
@@ -259,6 +263,7 @@ impl Dtype {
         }
     }
 
+    #[inline(always)]
     pub fn zero(&self) -> Scalar {
         match self {
             Dtype::Boolean => Scalar::Boolean(false),
@@ -277,6 +282,7 @@ impl Dtype {
         }
     }
 
+    #[inline(always)]
     pub fn one(&self) -> Scalar {
         match self {
             Dtype::Boolean => Scalar::Boolean(true),
@@ -315,6 +321,7 @@ pub enum Scalar {
 }
 
 impl Scalar {
+    #[inline(always)]
     pub fn to_string(&self) -> String {
         match self {
             Scalar::Boolean(x) => x.to_string(),
@@ -335,7 +342,7 @@ impl Scalar {
 }
 
 impl Scalar {
-    #[inline]
+    #[inline(always)]
     pub fn dtype(&self) -> Dtype {
         match self {
             Scalar::Boolean(_) => Dtype::Boolean,
@@ -354,7 +361,7 @@ impl Scalar {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn store(&self, buf: &mut [u8]) {
         match self {
             Scalar::Boolean(x) => buf[0] = *x as u8,
@@ -375,7 +382,7 @@ impl Scalar {
 }
 
 macro_rules! scalar_from {
-    ($src:ty, $dst:tt) => {
+    ($src:ty, $dst:tt, $as_fn:tt) => {
         impl From<Scalar> for $src {
             #[inline(always)]
             fn from(value: Scalar) -> $src {
@@ -391,22 +398,32 @@ macro_rules! scalar_from {
                 Scalar::$dst(value)
             }
         }
+
+        impl Scalar {
+            #[inline(always)]
+            pub fn $as_fn(&self) -> $src {
+                match self {
+                    Scalar::$dst(x) => *x,
+                    _ => unreachable!(),
+                }
+            }
+        }
     };
 }
 
-scalar_from!(bool, Boolean);
-scalar_from!(half::f16, Float16);
-scalar_from!(half::bf16, BFloat16);
-scalar_from!(f32, Float32);
-scalar_from!(f64, Float64);
-scalar_from!(i8, Int8);
-scalar_from!(i16, Int16);
-scalar_from!(i32, Int32);
-scalar_from!(i64, Int64);
-scalar_from!(u8, UInt8);
-scalar_from!(u16, UInt16);
-scalar_from!(u32, UInt32);
-scalar_from!(u64, UInt64);
+scalar_from!(bool, Boolean, as_bool);
+scalar_from!(f16, Float16, as_f16);
+scalar_from!(bf16, BFloat16, as_bf16);
+scalar_from!(f32, Float32, as_f32);
+scalar_from!(f64, Float64, as_f64);
+scalar_from!(i8, Int8, as_i8);
+scalar_from!(i16, Int16, as_i16);
+scalar_from!(i32, Int32, as_i32);
+scalar_from!(i64, Int64, as_i64);
+scalar_from!(u8, UInt8, as_u8);
+scalar_from!(u16, UInt16, as_u16);
+scalar_from!(u32, UInt32, as_u32);
+scalar_from!(u64, UInt64, as_u64);
 
 impl From<usize> for Scalar {
     fn from(value: usize) -> Self {
@@ -548,7 +565,7 @@ impl Scalar {
 }
 
 impl Scalar {
-    #[inline]
+    #[inline(always)]
     pub fn to_dtype(self, dtype: Dtype) -> Self {
         if self.dtype() == dtype {
             return self;
@@ -722,100 +739,6 @@ impl Scalar {
                 Dtype::UInt32 => (a as u32).into(),
                 Dtype::UInt64 => self,
             },
-        }
-    }
-}
-
-impl Scalar {
-    #[inline(always)]
-    pub fn as_bool(&self) -> bool {
-        match self {
-            Self::Boolean(a) => *a,
-            _ => unreachable!(),
-        }
-    }
-    #[inline(always)]
-    pub fn as_f16(&self) -> f16 {
-        match self {
-            Self::Float16(a) => *a,
-            _ => unreachable!(),
-        }
-    }
-    #[inline(always)]
-    pub fn as_bf16(&self) -> bf16 {
-        match self {
-            Self::BFloat16(a) => *a,
-            _ => unreachable!(),
-        }
-    }
-    #[inline(always)]
-    pub fn as_f32(&self) -> f32 {
-        match self {
-            Self::Float32(a) => *a,
-            _ => unreachable!(),
-        }
-    }
-    #[inline(always)]
-    pub fn as_f64(&self) -> f64 {
-        match self {
-            Self::Float64(a) => *a,
-            _ => unreachable!(),
-        }
-    }
-    #[inline(always)]
-    pub fn as_i8(&self) -> i8 {
-        match self {
-            Self::Int8(a) => *a,
-            _ => unreachable!(),
-        }
-    }
-    #[inline(always)]
-    pub fn as_i16(&self) -> i16 {
-        match self {
-            Self::Int16(a) => *a,
-            _ => unreachable!(),
-        }
-    }
-    #[inline(always)]
-    pub fn as_i32(&self) -> i32 {
-        match self {
-            Self::Int32(a) => *a,
-            _ => unreachable!(),
-        }
-    }
-    #[inline(always)]
-    pub fn as_i64(&self) -> i64 {
-        match self {
-            Self::Int64(a) => *a,
-            _ => unreachable!(),
-        }
-    }
-    #[inline(always)]
-    pub fn as_u8(&self) -> u8 {
-        match self {
-            Self::UInt8(a) => *a,
-            _ => unreachable!(),
-        }
-    }
-    #[inline(always)]
-    pub fn as_u16(&self) -> u16 {
-        match self {
-            Self::UInt16(a) => *a,
-            _ => unreachable!(),
-        }
-    }
-    #[inline(always)]
-    pub fn as_u32(&self) -> u32 {
-        match self {
-            Self::UInt32(a) => *a,
-            _ => unreachable!(),
-        }
-    }
-    #[inline(always)]
-    pub fn as_u64(&self) -> u64 {
-        match self {
-            Self::UInt64(a) => *a,
-            _ => unreachable!(),
         }
     }
 }

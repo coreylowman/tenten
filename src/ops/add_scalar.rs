@@ -10,7 +10,7 @@ impl Tensor {
             std::format!("x + {scalar:?}"),
         );
         if let Some([x_grad, y_grad]) = all_some([x_ghost.grad(), y.grad()]) {
-            crate::backward::record_op(move || x_grad.alloc()?.add_assign(y_grad.alloc()?));
+            crate::backward::record_op(move || x_grad.alloc()?.add_assign(y_grad));
         }
         Ok(y)
     }

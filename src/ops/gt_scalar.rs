@@ -9,6 +9,7 @@ impl Tensor {
             std::format!("x > {}", scalar.to_string()),
         );
         y.deferred_dtype = Dtype::Boolean;
+        y.gradient = None;
         Ok(y)
     }
 }
