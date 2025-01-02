@@ -2,6 +2,8 @@ use std::ops::Deref;
 use std::{cell::RefCell, rc::Rc};
 
 use cudarc::driver::DeviceSlice;
+use rand::Rng;
+use rand_distr::{Distribution, StandardNormal};
 
 use crate::tensor::*;
 
@@ -11,13 +13,30 @@ thread_local! {
     }
 }
 
-pub fn set_default_dtype(dtype: Dtype) {
-    DEFAULT_DTYPE.with_borrow_mut(|default_dtype| *default_dtype = dtype);
-}
-
 impl Default for Dtype {
     fn default() -> Self {
         DEFAULT_DTYPE.with_borrow(|dtype| *dtype)
+    }
+}
+
+pub fn set_default_dtype(dtype: Dtype) {
+    DEFAULT_DTYPE.with_borrow_mut(|default_dtype| *default_dtype = dtype);
+}
+pub struct WithDtype {
+    curr: Dtype,
+    prev: Dtype,
+}
+
+pub fn with_dtype(dtype: Dtype) -> WithDtype {
+    WithDtype {
+        curr: dtype,
+        prev: DEFAULT_DTYPE.with_borrow_mut(|curr| std::mem::replace(curr, dtype)),
+    }
+}
+
+impl Drop for WithDtype {
+    fn drop(&mut self) {
+        DEFAULT_DTYPE.with_borrow_mut(|x| std::mem::replace(x, self.prev));
     }
 }
 
@@ -34,6 +53,24 @@ pub fn set_default_device(device: Device) {
 impl Default for Device {
     fn default() -> Self {
         DEFAULT_DEVICE.with_borrow(|device| *device)
+    }
+}
+
+pub struct WithDevice {
+    curr: Device,
+    prev: Device,
+}
+
+pub fn with_device(device: Device) -> WithDevice {
+    WithDevice {
+        curr: device,
+        prev: DEFAULT_DEVICE.with_borrow_mut(|curr| std::mem::replace(curr, device)),
+    }
+}
+
+impl Drop for WithDevice {
+    fn drop(&mut self) {
+        DEFAULT_DEVICE.with_borrow_mut(|x| std::mem::replace(x, self.prev));
     }
 }
 
@@ -97,12 +134,13 @@ where
     let strides = nd_bytes_strides(&shape, dtype.num_bytes());
     let device: Device = Default::default();
     let numel: usize = shape.iter().product();
+    let num_bytes = numel * dtype.num_bytes();
     let bytes = match device {
         Device::Phantom => BytesPtr::Phantom,
-        Device::Cpu => BytesPtr::Cpu(vec![0; numel]),
+        Device::Cpu => BytesPtr::Cpu(vec![0; num_bytes]),
         Device::Cuda(dev) => {
             let cuda = crate::util::thread_cuda(dev);
-            BytesPtr::Cuda(cuda.alloc_zeros(numel)?)
+            BytesPtr::Cuda(cuda.alloc_zeros(num_bytes)?)
         }
     };
     Ok(build_tensor(
@@ -114,49 +152,28 @@ where
     ))
 }
 
-impl Tensor {
-    pub fn zeros_like(&self) -> Result<Self, Error> {
-        let dtype = self.deferred_dtype;
-        let shape = self.shape.clone();
-        let strides = self.strides.clone();
-        let bytes = match self.bytes_ptr.borrow().deref() {
-            BytesPtr::Phantom => BytesPtr::Phantom,
-            &BytesPtr::Lazy(Device::Phantom, _) => BytesPtr::Phantom,
-            &BytesPtr::Lazy(Device::Cpu, len) => BytesPtr::Cpu(vec![0; len]),
-            &BytesPtr::Lazy(Device::Cuda(ordinal), len) => {
-                BytesPtr::Cuda(crate::util::thread_cuda(ordinal).alloc_zeros(len)?)
-            }
-            BytesPtr::Cpu(src) => BytesPtr::Cpu(vec![0; src.len()]),
-            BytesPtr::Cuda(src) => {
-                let cuda = src.device();
-                BytesPtr::Cuda(cuda.alloc_zeros(src.len())?)
-            }
-        };
-        Ok(build_tensor(
-            dtype,
-            shape,
-            strides,
-            bytes,
-            self.requires_grad() && crate::backward::is_recording(),
-        ))
-    }
-}
-
-pub fn ones<Shape>(shape: Shape) -> Result<Tensor, Error>
-where
-    Shape: Into<Vec<usize>>,
-{
-    let shape = Into::<Vec<usize>>::into(shape);
-    let dtype: Dtype = Default::default();
-    let strides = nd_bytes_strides(&shape, dtype.num_bytes());
-    let device: Device = Default::default();
-    todo!()
-}
-
-impl Tensor {
-    pub fn ones_like(&self) -> Result<Self, Error> {
-        todo!()
-    }
+pub fn zeros_like(x: &Tensor) -> Result<Tensor, Error> {
+    let dtype = x.dtype();
+    let bytes = match x.bytes_ptr.borrow().deref() {
+        BytesPtr::Phantom => BytesPtr::Phantom,
+        &BytesPtr::Lazy(Device::Phantom, _) => BytesPtr::Phantom,
+        &BytesPtr::Lazy(Device::Cpu, len) => BytesPtr::Cpu(vec![0; len]),
+        &BytesPtr::Lazy(Device::Cuda(ordinal), len) => {
+            BytesPtr::Cuda(crate::util::thread_cuda(ordinal).alloc_zeros(len)?)
+        }
+        BytesPtr::Cpu(src) => BytesPtr::Cpu(vec![0; src.len()]),
+        BytesPtr::Cuda(src) => {
+            let cuda = src.device();
+            BytesPtr::Cuda(cuda.alloc_zeros(src.len())?)
+        }
+    };
+    Ok(build_tensor(
+        dtype,
+        x.shape.clone(),
+        x.strides.clone(),
+        bytes,
+        x.requires_grad() && crate::backward::is_recording(),
+    ))
 }
 
 pub unsafe fn empty<Shape>(shape: Shape) -> Result<Tensor, Error>
@@ -168,12 +185,13 @@ where
     let strides = nd_bytes_strides(&shape, dtype.num_bytes());
     let device: Device = Default::default();
     let numel: usize = shape.iter().product();
+    let num_bytes = numel * dtype.num_bytes();
     let bytes = match device {
         Device::Phantom => BytesPtr::Phantom,
-        Device::Cpu => BytesPtr::Cpu(vec![0; numel]),
+        Device::Cpu => BytesPtr::Cpu(vec![0; num_bytes]),
         Device::Cuda(dev) => {
             let cuda = crate::util::thread_cuda(dev);
-            BytesPtr::Cuda(cuda.alloc(numel)?)
+            BytesPtr::Cuda(cuda.alloc(num_bytes)?)
         }
     };
     Ok(build_tensor(
@@ -185,28 +203,24 @@ where
     ))
 }
 
-impl Tensor {
-    pub unsafe fn empty_like(&self) -> Result<Self, Error> {
-        let dtype = self.deferred_dtype;
-        let shape = self.shape.clone();
-        let strides = self.strides.clone();
-        let bytes = match self.bytes_ptr.borrow().deref() {
-            BytesPtr::Phantom => BytesPtr::Phantom,
-            BytesPtr::Lazy(dev, len) => todo!(),
-            BytesPtr::Cpu(src) => BytesPtr::Cpu(vec![0; src.len()]),
-            BytesPtr::Cuda(src) => {
-                let cuda = src.device();
-                BytesPtr::Cuda(cuda.alloc(src.len())?)
-            }
-        };
-        Ok(build_tensor(
-            dtype,
-            shape,
-            strides,
-            bytes,
-            self.requires_grad() && crate::backward::is_recording(),
-        ))
-    }
+pub unsafe fn empty_like(x: &Tensor) -> Result<Tensor, Error> {
+    let dtype = x.dtype();
+    let bytes = match x.bytes_ptr.borrow().deref() {
+        BytesPtr::Phantom => BytesPtr::Phantom,
+        &BytesPtr::Lazy(dev, len) => BytesPtr::Lazy(dev, len),
+        BytesPtr::Cpu(src) => BytesPtr::Cpu(vec![0; src.len()]),
+        BytesPtr::Cuda(src) => {
+            let cuda = src.device();
+            BytesPtr::Cuda(cuda.alloc(src.len())?)
+        }
+    };
+    Ok(build_tensor(
+        dtype,
+        x.shape.clone(),
+        x.strides.clone(),
+        bytes,
+        x.requires_grad() && crate::backward::is_recording(),
+    ))
 }
 
 pub fn full<Shape, S>(shape: Shape, value: S) -> Result<Tensor, Error>
@@ -219,7 +233,30 @@ where
     let dtype = value.dtype();
     let strides = nd_bytes_strides(&shape, dtype.num_bytes());
     let device: Device = Default::default();
-    todo!()
+    let numel: usize = shape.iter().product();
+    let num_bytes = numel * dtype.num_bytes();
+
+    let mut init_buf = vec![0; num_bytes];
+    for i in (0..num_bytes).step_by(dtype.num_bytes()) {
+        value.store(&mut init_buf[i..]);
+    }
+
+    let bytes = match device {
+        Device::Phantom => BytesPtr::Phantom,
+        Device::Cpu => BytesPtr::Cpu(init_buf),
+        Device::Cuda(ordinal) => {
+            let cuda = crate::util::thread_cuda(ordinal);
+            BytesPtr::Cuda(cuda.htod_sync_copy(&init_buf)?)
+        }
+    };
+
+    Ok(build_tensor(
+        dtype,
+        shape,
+        strides,
+        bytes,
+        crate::backward::is_recording(),
+    ))
 }
 
 pub fn sample_uniform<Shape>(shape: Shape) -> Result<Tensor, Error>
@@ -230,101 +267,264 @@ where
     let dtype: Dtype = Default::default();
     let strides = nd_bytes_strides(&shape, dtype.num_bytes());
     let device: Device = Default::default();
-    todo!()
+    let numel: usize = shape.iter().product();
+    let num_bytes = numel * dtype.num_bytes();
+
+    let mut rng = rand::thread_rng();
+    let mut init_buf = vec![0; num_bytes];
+    for i in (0..num_bytes).step_by(dtype.num_bytes()) {
+        let value = match dtype {
+            Dtype::Boolean => Scalar::Boolean(rng.gen()),
+            Dtype::Float16 => Scalar::Float16(f16::from_f32(rng.gen())),
+            Dtype::BFloat16 => Scalar::BFloat16(bf16::from_f32(rng.gen())),
+            Dtype::Float32 => Scalar::Float32(rng.gen()),
+            Dtype::Float64 => Scalar::Float64(rng.gen()),
+            Dtype::Int8 => Scalar::Int8(rng.gen()),
+            Dtype::Int16 => Scalar::Int16(rng.gen()),
+            Dtype::Int32 => Scalar::Int32(rng.gen()),
+            Dtype::Int64 => Scalar::Int64(rng.gen()),
+            Dtype::UInt8 => Scalar::UInt8(rng.gen()),
+            Dtype::UInt16 => Scalar::UInt16(rng.gen()),
+            Dtype::UInt32 => Scalar::UInt32(rng.gen()),
+            Dtype::UInt64 => Scalar::UInt64(rng.gen()),
+        };
+        value.store(&mut init_buf[i..]);
+    }
+
+    let bytes = match device {
+        Device::Phantom => BytesPtr::Phantom,
+        Device::Cpu => BytesPtr::Cpu(init_buf),
+        Device::Cuda(ordinal) => {
+            let cuda = crate::util::thread_cuda(ordinal);
+            BytesPtr::Cuda(cuda.htod_sync_copy(&init_buf)?)
+        }
+    };
+
+    Ok(build_tensor(
+        dtype,
+        shape,
+        strides,
+        bytes,
+        crate::backward::is_recording(),
+    ))
 }
 
-impl Tensor {
-    pub fn sample_uniform_like(&self) -> Self {
-        todo!()
+pub fn sample_uniform_like(x: &Tensor) -> Result<Tensor, Error> {
+    let dtype = x.dtype();
+    let numel = x.numel();
+    let num_bytes = numel * dtype.num_bytes();
+
+    let mut rng = rand::thread_rng();
+    let mut init_buf = vec![0; num_bytes];
+    for i in (0..num_bytes).step_by(dtype.num_bytes()) {
+        let value = match dtype {
+            Dtype::Boolean => Scalar::Boolean(rng.gen()),
+            Dtype::Float16 => Scalar::Float16(f16::from_f32(rng.gen())),
+            Dtype::BFloat16 => Scalar::BFloat16(bf16::from_f32(rng.gen())),
+            Dtype::Float32 => Scalar::Float32(rng.gen()),
+            Dtype::Float64 => Scalar::Float64(rng.gen()),
+            Dtype::Int8 => Scalar::Int8(rng.gen()),
+            Dtype::Int16 => Scalar::Int16(rng.gen()),
+            Dtype::Int32 => Scalar::Int32(rng.gen()),
+            Dtype::Int64 => Scalar::Int64(rng.gen()),
+            Dtype::UInt8 => Scalar::UInt8(rng.gen()),
+            Dtype::UInt16 => Scalar::UInt16(rng.gen()),
+            Dtype::UInt32 => Scalar::UInt32(rng.gen()),
+            Dtype::UInt64 => Scalar::UInt64(rng.gen()),
+        };
+        value.store(&mut init_buf[i..]);
     }
+
+    let bytes = match x.device() {
+        Device::Phantom => BytesPtr::Phantom,
+        Device::Cpu => BytesPtr::Cpu(init_buf),
+        Device::Cuda(ordinal) => {
+            let cuda = crate::util::thread_cuda(ordinal);
+            BytesPtr::Cuda(cuda.htod_sync_copy(&init_buf)?)
+        }
+    };
+
+    Ok(build_tensor(
+        dtype,
+        x.shape.clone(),
+        x.strides.clone(),
+        bytes,
+        crate::backward::is_recording(),
+    ))
 }
 
 pub fn sample_normal<Shape>(shape: Shape) -> Result<Tensor, Error>
 where
     Shape: Into<Vec<usize>>,
 {
+    sample_dist(shape, &StandardNormal)
+}
+
+pub fn sample_normal_like(x: &Tensor) -> Result<Tensor, Error> {
+    sample_dist_like(x, &StandardNormal)
+}
+
+pub fn sample_dist<Shape, D>(shape: Shape, distr: &D) -> Result<Tensor, Error>
+where
+    Shape: Into<Vec<usize>>,
+    D: Distribution<f32>,
+{
     let shape = Into::<Vec<usize>>::into(shape);
     let dtype: Dtype = Default::default();
     let strides = nd_bytes_strides(&shape, dtype.num_bytes());
     let device: Device = Default::default();
-    todo!()
+    let numel: usize = shape.iter().product();
+    let num_bytes = numel * dtype.num_bytes();
+
+    let mut rng = rand::thread_rng();
+    let mut init_buf = vec![0; num_bytes];
+    for i in (0..num_bytes).step_by(dtype.num_bytes()) {
+        let value = match dtype {
+            Dtype::Float16 => Scalar::Float16(f16::from_f32(rng.sample(distr))),
+            Dtype::BFloat16 => Scalar::BFloat16(bf16::from_f32(rng.sample(distr))),
+            Dtype::Float32 => Scalar::Float32(rng.sample(distr)),
+            Dtype::Float64 => Scalar::Float64(rng.sample(distr) as f64),
+            _ => unimplemented!("Can't sample {dtype:?} values from a f32 distribution"),
+        };
+        value.store(&mut init_buf[i..]);
+    }
+
+    let bytes = match device {
+        Device::Phantom => BytesPtr::Phantom,
+        Device::Cpu => BytesPtr::Cpu(init_buf),
+        Device::Cuda(ordinal) => {
+            let cuda = crate::util::thread_cuda(ordinal);
+            BytesPtr::Cuda(cuda.htod_sync_copy(&init_buf)?)
+        }
+    };
+
+    Ok(build_tensor(
+        dtype,
+        shape,
+        strides,
+        bytes,
+        crate::backward::is_recording(),
+    ))
 }
 
-impl Tensor {
-    pub fn sample_normal_like(&self) -> Result<Self, Error> {
-        todo!()
-    }
-}
+pub fn sample_dist_like<D>(x: &Tensor, distr: &D) -> Result<Tensor, Error>
+where
+    D: Distribution<f32>,
+{
+    let dtype = x.dtype();
+    let numel = x.numel();
+    let num_bytes = numel * dtype.num_bytes();
 
-pub fn dtype_of<T>() -> Dtype {
-    match std::any::type_name::<T>() {
-        "half::f16" => Dtype::Float16,
-        "half::bf16" => Dtype::BFloat16,
-        "f32" => Dtype::Float32,
-        "f64" => Dtype::Float64,
-        "i8" => Dtype::Int8,
-        "i16" => Dtype::Int16,
-        "i32" => Dtype::Int32,
-        "i64" => Dtype::Int64,
-        "u8" => Dtype::UInt8,
-        "u16" => Dtype::UInt16,
-        "u32" => Dtype::UInt32,
-        "u64" => Dtype::UInt64,
-        not_supported => unimplemented!("unable to handle type {not_supported}"),
+    let mut rng = rand::thread_rng();
+    let mut init_buf = vec![0; num_bytes];
+    for i in (0..num_bytes).step_by(dtype.num_bytes()) {
+        let value = match dtype {
+            Dtype::Float16 => Scalar::Float16(f16::from_f32(rng.sample(distr))),
+            Dtype::BFloat16 => Scalar::BFloat16(bf16::from_f32(rng.sample(distr))),
+            Dtype::Float32 => Scalar::Float32(rng.sample(distr)),
+            Dtype::Float64 => Scalar::Float64(rng.sample(distr) as f64),
+            _ => unimplemented!("Can't sample {dtype:?} values from a f32 distribution"),
+        };
+        value.store(&mut init_buf[i..]);
     }
+
+    let bytes = match x.device() {
+        Device::Phantom => BytesPtr::Phantom,
+        Device::Cpu => BytesPtr::Cpu(init_buf),
+        Device::Cuda(ordinal) => {
+            let cuda = crate::util::thread_cuda(ordinal);
+            BytesPtr::Cuda(cuda.htod_sync_copy(&init_buf)?)
+        }
+    };
+
+    Ok(build_tensor(
+        dtype,
+        x.shape.clone(),
+        x.strides.clone(),
+        bytes,
+        crate::backward::is_recording(),
+    ))
 }
 
 pub fn copy_slice<T, Shape>(buf: &[T], shape: Shape) -> Result<Tensor, Error>
 where
     Shape: Into<Vec<usize>>,
+    T: Copy + Into<Scalar>,
 {
     let dtype = dtype_of::<T>();
     let shape = Into::<Vec<usize>>::into(shape);
     let strides = nd_bytes_strides(&shape, dtype.num_bytes());
     let device: Device = Default::default();
-    todo!()
+    let numel: usize = shape.iter().product();
+    let num_bytes = numel * dtype.num_bytes();
+
+    assert_eq!(
+        numel,
+        buf.len(),
+        "Shape ({shape:?}) has {numel:?} elements, but found {} elements in src slice",
+        buf.len()
+    );
+
+    let mut init_buf = vec![0; num_bytes];
+    for (i, x) in buf.iter().enumerate() {
+        let value = Into::<Scalar>::into(*x);
+        value.store(&mut init_buf[(i * dtype.num_bytes())..]);
+    }
+
+    let bytes = match device {
+        Device::Phantom => BytesPtr::Phantom,
+        Device::Cpu => BytesPtr::Cpu(init_buf),
+        Device::Cuda(ordinal) => {
+            let cuda = crate::util::thread_cuda(ordinal);
+            BytesPtr::Cuda(cuda.htod_sync_copy(&init_buf)?)
+        }
+    };
+
+    Ok(build_tensor(
+        dtype,
+        shape,
+        strides,
+        bytes,
+        crate::backward::is_recording(),
+    ))
 }
 
-impl<T: Into<Scalar>, const M: usize> From<[T; M]> for Tensor {
+impl<T: Copy + Into<Scalar>, const M: usize> From<[T; M]> for Tensor {
     fn from(value: [T; M]) -> Self {
-        let dtype = dtype_of::<T>();
-        let shape = vec![M];
-        let strides = nd_bytes_strides(&shape, dtype.num_bytes());
-        let device: Device = Default::default();
-        todo!()
+        copy_slice(&value, [M]).unwrap()
     }
 }
 
-impl<T: Into<Scalar>, const M: usize, const N: usize> From<[[T; N]; M]> for Tensor {
+impl<T: Copy + Into<Scalar>, const M: usize, const N: usize> From<[[T; N]; M]> for Tensor {
     fn from(value: [[T; N]; M]) -> Self {
-        let dtype = dtype_of::<T>();
-        let shape = vec![M, N];
-        let strides = nd_bytes_strides(&shape, dtype.num_bytes());
-        let device: Device = Default::default();
-        todo!()
+        copy_slice(
+            unsafe { std::slice::from_raw_parts(value.as_ptr() as *const T, M * N) },
+            [M, N],
+        )
+        .unwrap()
     }
 }
 
-impl<T: Into<Scalar>, const M: usize, const N: usize, const O: usize> From<[[[T; O]; N]; M]>
+impl<T: Copy + Into<Scalar>, const M: usize, const N: usize, const O: usize> From<[[[T; O]; N]; M]>
     for Tensor
 {
     fn from(value: [[[T; O]; N]; M]) -> Self {
-        let dtype = dtype_of::<T>();
-        let shape = vec![M, N, O];
-        let strides = nd_bytes_strides(&shape, dtype.num_bytes());
-        let device: Device = Default::default();
-        todo!()
+        copy_slice(
+            unsafe { std::slice::from_raw_parts(value.as_ptr() as *const T, M * N * O) },
+            [M, N, O],
+        )
+        .unwrap()
     }
 }
 
-impl<T: Into<Scalar>, const M: usize, const N: usize, const O: usize, const P: usize>
+impl<T: Copy + Into<Scalar>, const M: usize, const N: usize, const O: usize, const P: usize>
     From<[[[[T; P]; O]; N]; M]> for Tensor
 {
     fn from(value: [[[[T; P]; O]; N]; M]) -> Self {
-        let dtype = dtype_of::<T>();
-        let shape = vec![M, N, O, P];
-        let strides = nd_bytes_strides(&shape, dtype.num_bytes());
-        let device: Device = Default::default();
-        todo!()
+        copy_slice(
+            unsafe { std::slice::from_raw_parts(value.as_ptr() as *const T, M * N * O * P) },
+            [M, N, O, P],
+        )
+        .unwrap()
     }
 }

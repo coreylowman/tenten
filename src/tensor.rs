@@ -830,3 +830,21 @@ impl Axis {
         self.0.rem_euclid(num_dims as isize) as usize
     }
 }
+
+pub fn dtype_of<T>() -> Dtype {
+    match std::any::type_name::<T>() {
+        "half::f16" => Dtype::Float16,
+        "half::bf16" => Dtype::BFloat16,
+        "f32" => Dtype::Float32,
+        "f64" => Dtype::Float64,
+        "i8" => Dtype::Int8,
+        "i16" => Dtype::Int16,
+        "i32" => Dtype::Int32,
+        "i64" => Dtype::Int64,
+        "u8" => Dtype::UInt8,
+        "u16" => Dtype::UInt16,
+        "u32" => Dtype::UInt32,
+        "u64" => Dtype::UInt64,
+        not_supported => unimplemented!("unable to handle type {not_supported}"),
+    }
+}

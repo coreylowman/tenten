@@ -7,6 +7,7 @@ edition = "2021"
 cudarc = { version = "0.12.2", features = ["cuda-12060", "nccl"] }
 half = "2.4.1"
 rand = "0.8.5"
+rand_distr = "0.4.3"
 
 [features]
 cudnn = ["cudarc/cudnn"]
