@@ -16,3 +16,6 @@ allocation: Allocation {
 # activation checkpointing
 
 rerun forward again in backwards?
+
+
+# TODO

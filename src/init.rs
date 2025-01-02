@@ -3,7 +3,6 @@ use std::{cell::RefCell, rc::Rc};
 
 use cudarc::driver::DeviceSlice;
 
-use crate::dtype::*;
 use crate::tensor::*;
 
 thread_local! {
@@ -102,7 +101,7 @@ where
         Device::Phantom => BytesPtr::Phantom,
         Device::Cpu => BytesPtr::Cpu(vec![0; numel]),
         Device::Cuda(dev) => {
-            let cuda = crate::cuda::thread_cuda(dev);
+            let cuda = crate::util::thread_cuda(dev);
             BytesPtr::Cuda(cuda.alloc_zeros(numel)?)
         }
     };
@@ -125,7 +124,7 @@ impl Tensor {
             &BytesPtr::Lazy(Device::Phantom, _) => BytesPtr::Phantom,
             &BytesPtr::Lazy(Device::Cpu, len) => BytesPtr::Cpu(vec![0; len]),
             &BytesPtr::Lazy(Device::Cuda(ordinal), len) => {
-                BytesPtr::Cuda(crate::cuda::thread_cuda(ordinal).alloc_zeros(len)?)
+                BytesPtr::Cuda(crate::util::thread_cuda(ordinal).alloc_zeros(len)?)
             }
             BytesPtr::Cpu(src) => BytesPtr::Cpu(vec![0; src.len()]),
             BytesPtr::Cuda(src) => {
@@ -173,7 +172,7 @@ where
         Device::Phantom => BytesPtr::Phantom,
         Device::Cpu => BytesPtr::Cpu(vec![0; numel]),
         Device::Cuda(dev) => {
-            let cuda = crate::cuda::thread_cuda(dev);
+            let cuda = crate::util::thread_cuda(dev);
             BytesPtr::Cuda(cuda.alloc(numel)?)
         }
     };
