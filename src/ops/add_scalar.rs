@@ -5,7 +5,7 @@ impl Tensor {
         let scalar = Into::<Scalar>::into(scalar).to_dtype(self.dtype());
         let x_ghost = self.clone();
         let y = self.defer_op_with_args(
-            std::format!("add_{scalar:?}"),
+            std::format!("add{}", scalar.to_string()),
             (|x, args| *x + args[0], vec![scalar]),
             std::format!("x + {scalar:?}"),
         );

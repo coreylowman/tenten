@@ -6,6 +6,7 @@ use rand::Rng;
 use rand_distr::{Distribution, StandardNormal};
 
 use crate::tensor::*;
+use crate::util::CpuIndex;
 
 thread_local! {
     pub(crate) static DEFAULT_DTYPE: RefCell<Dtype> = const {
@@ -22,19 +23,17 @@ impl Default for Dtype {
 pub fn set_default_dtype(dtype: Dtype) {
     DEFAULT_DTYPE.with_borrow_mut(|default_dtype| *default_dtype = dtype);
 }
-pub struct WithDtype {
-    curr: Dtype,
+pub struct WithDtypeGuard {
     prev: Dtype,
 }
 
-pub fn with_dtype(dtype: Dtype) -> WithDtype {
-    WithDtype {
-        curr: dtype,
+pub fn with_dtype(dtype: Dtype) -> WithDtypeGuard {
+    WithDtypeGuard {
         prev: DEFAULT_DTYPE.with_borrow_mut(|curr| std::mem::replace(curr, dtype)),
     }
 }
 
-impl Drop for WithDtype {
+impl Drop for WithDtypeGuard {
     fn drop(&mut self) {
         DEFAULT_DTYPE.with_borrow_mut(|x| std::mem::replace(x, self.prev));
     }
@@ -56,19 +55,17 @@ impl Default for Device {
     }
 }
 
-pub struct WithDevice {
-    curr: Device,
+pub struct WithDeviceGuard {
     prev: Device,
 }
 
-pub fn with_device(device: Device) -> WithDevice {
-    WithDevice {
-        curr: device,
+pub fn with_device(device: Device) -> WithDeviceGuard {
+    WithDeviceGuard {
         prev: DEFAULT_DEVICE.with_borrow_mut(|curr| std::mem::replace(curr, device)),
     }
 }
 
-impl Drop for WithDevice {
+impl Drop for WithDeviceGuard {
     fn drop(&mut self) {
         DEFAULT_DEVICE.with_borrow_mut(|x| std::mem::replace(x, self.prev));
     }
@@ -84,7 +81,7 @@ pub fn nd_bytes_strides(shape: &[usize], byte_stride: usize) -> Vec<usize> {
     }
 
     let mut last = byte_stride;
-    strides.push(1);
+    strides.push(last);
 
     for n in shape.iter().skip(1).rev() {
         last *= n;
@@ -246,7 +243,7 @@ where
         Device::Cpu => BytesPtr::Cpu(init_buf),
         Device::Cuda(ordinal) => {
             let cuda = crate::util::thread_cuda(ordinal);
-            BytesPtr::Cuda(cuda.htod_sync_copy(&init_buf)?)
+            BytesPtr::Cuda(cuda.htod_copy(init_buf)?)
         }
     };
 
@@ -296,7 +293,7 @@ where
         Device::Cpu => BytesPtr::Cpu(init_buf),
         Device::Cuda(ordinal) => {
             let cuda = crate::util::thread_cuda(ordinal);
-            BytesPtr::Cuda(cuda.htod_sync_copy(&init_buf)?)
+            BytesPtr::Cuda(cuda.htod_copy(init_buf)?)
         }
     };
 
@@ -340,7 +337,7 @@ pub fn sample_uniform_like(x: &Tensor) -> Result<Tensor, Error> {
         Device::Cpu => BytesPtr::Cpu(init_buf),
         Device::Cuda(ordinal) => {
             let cuda = crate::util::thread_cuda(ordinal);
-            BytesPtr::Cuda(cuda.htod_sync_copy(&init_buf)?)
+            BytesPtr::Cuda(cuda.htod_copy(init_buf)?)
         }
     };
 
@@ -394,7 +391,7 @@ where
         Device::Cpu => BytesPtr::Cpu(init_buf),
         Device::Cuda(ordinal) => {
             let cuda = crate::util::thread_cuda(ordinal);
-            BytesPtr::Cuda(cuda.htod_sync_copy(&init_buf)?)
+            BytesPtr::Cuda(cuda.htod_copy(init_buf)?)
         }
     };
 
@@ -433,7 +430,7 @@ where
         Device::Cpu => BytesPtr::Cpu(init_buf),
         Device::Cuda(ordinal) => {
             let cuda = crate::util::thread_cuda(ordinal);
-            BytesPtr::Cuda(cuda.htod_sync_copy(&init_buf)?)
+            BytesPtr::Cuda(cuda.htod_copy(init_buf)?)
         }
     };
 
@@ -476,7 +473,7 @@ where
         Device::Cpu => BytesPtr::Cpu(init_buf),
         Device::Cuda(ordinal) => {
             let cuda = crate::util::thread_cuda(ordinal);
-            BytesPtr::Cuda(cuda.htod_sync_copy(&init_buf)?)
+            BytesPtr::Cuda(cuda.htod_copy(init_buf)?)
         }
     };
 
@@ -487,6 +484,31 @@ where
         bytes,
         crate::backward::is_recording(),
     ))
+}
+
+impl Tensor {
+    pub fn into_vec<T>(self) -> Result<Vec<T>, Error>
+    where
+        T: Copy + From<Scalar>,
+    {
+        let dtype = self.dtype();
+        assert_eq!(dtype, dtype_of::<T>());
+        let t = self.undefer()?.to_device(Device::Cpu)?;
+        let mut out = Vec::with_capacity(t.numel());
+        match t.bytes_ptr.borrow().deref() {
+            BytesPtr::Cpu(buf) => {
+                let mut idx = CpuIndex::new(&t.shape, &t.strides, t.byte_stride);
+                for _ in 0..t.numel() {
+                    let i = idx.next().unwrap();
+                    let value = dtype.read(&buf[i..]);
+                    out.push(value.into())
+                }
+                assert!(idx.next().is_none());
+            }
+            _ => unreachable!(),
+        };
+        Ok(out)
+    }
 }
 
 impl<T: Copy + Into<Scalar>, const M: usize> From<[T; M]> for Tensor {

@@ -36,6 +36,7 @@ pub(crate) struct CpuIndex<'a> {
     pub(crate) strides: &'a [usize],
     pub(crate) next: Option<usize>,
     pub(crate) contiguous: Option<usize>,
+    pub(crate) byte_stride: usize,
 }
 
 impl<'a> CpuIndex<'a> {
@@ -48,6 +49,7 @@ impl<'a> CpuIndex<'a> {
             next: if shape.len() > 0 { Some(0) } else { None },
             contiguous: (strides == &crate::init::nd_bytes_strides(shape, byte_stride))
                 .then(|| shape.iter().product::<usize>()),
+            byte_stride,
         }
     }
 }
@@ -76,7 +78,7 @@ impl<'a> CpuIndex<'a> {
                     } else {
                         *i = next;
                     }
-                    Some(idx)
+                    Some(idx * self.byte_stride)
                 }
                 None => None,
             },

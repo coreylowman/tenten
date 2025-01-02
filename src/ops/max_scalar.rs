@@ -6,7 +6,7 @@ impl Tensor {
         let dtype = self.dtype();
         let x = self.clone();
         let y = self.defer_op_with_args(
-            std::format!("max_{scalar:?}"),
+            std::format!("max{}", scalar.to_string()),
             (
                 |a, args| {
                     if *a > args[0] {
@@ -17,7 +17,7 @@ impl Tensor {
                 },
                 vec![scalar],
             ),
-            std::format!("(x > {scalar:?} ? {scalar:?} : x)"),
+            std::format!("(x > {v} ? {v} : x)", v = scalar.to_string()),
         );
         if let Some([x_grad, y_grad]) = all_some([x.grad(), y.grad()]) {
             crate::backward::record_op(move || {

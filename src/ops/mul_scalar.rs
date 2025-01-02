@@ -5,9 +5,9 @@ impl Tensor {
         let scalar = Into::<Scalar>::into(scalar).to_dtype(self.dtype());
         let x = self.clone();
         let y = self.defer_op_with_args(
-            std::format!("mul_{scalar:?}"),
+            std::format!("mul{}", scalar.to_string()),
             (|x, args| *x * args[0], vec![scalar]),
-            std::format!("x * {scalar:?}"),
+            std::format!("x * {}", scalar.to_string()),
         );
         if let Some([x_grad, y_grad]) = all_some([x.grad(), y.grad()]) {
             crate::backward::record_op(move || {

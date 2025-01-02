@@ -34,3 +34,37 @@ impl Tensor {
         Ok(y)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{init::*, tensor::*, tests::*};
+
+    #[test]
+    fn test_abs() -> Result<(), Error> {
+        set_default_device(TEST_DEVICE);
+        set_default_dtype(TEST_DTYPE);
+
+        let x = Tensor::from([
+            -1.0,
+            0.0,
+            -0.0,
+            1.0,
+            TestDtype::INFINITY,
+            TestDtype::NEG_INFINITY,
+            TestDtype::NAN,
+        ]);
+        assert_all_close(
+            &x.abs()?.into_vec()?,
+            &[
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                TestDtype::INFINITY,
+                TestDtype::INFINITY,
+                TestDtype::NAN,
+            ],
+        );
+        Ok(())
+    }
+}

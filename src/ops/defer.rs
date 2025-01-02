@@ -1,6 +1,8 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, ops::DerefMut, rc::Rc};
 
-use crate::tensor::*;
+use cudarc::{driver::LaunchAsync, nvrtc::compile_ptx};
+
+use crate::{tensor::*, util::launch_cfg};
 
 impl Tensor {
     #[inline(always)]
@@ -71,5 +73,67 @@ impl Tensor {
             }
         }
         prog
+    }
+
+    pub fn undefer(mut self) -> Result<Self, Error> {
+        if self.deferred_ops.len() == 0 {
+            return Ok(self);
+        }
+
+        assert!(self.deferred_dtype.num_bytes() <= self.byte_stride);
+
+        let byte_stride = self.byte_stride;
+        let stored_dtype = self.stored_dtype;
+        let dtype = self.deferred_dtype;
+        let numel = self.numel();
+
+        let prog_name = self.get_deferred_program_name();
+        let cpu_prog = self.deferred_ops_cpu_closure();
+        let cuda_prog = self.deffered_ops_cuda_instructions();
+
+        match Rc::make_mut(&mut self.bytes_ptr).borrow_mut().deref_mut() {
+            BytesPtr::Cpu(buf) => {
+                for i in (0..buf.len()).step_by(byte_stride) {
+                    let value = stored_dtype.read(&buf[i..]);
+                    cpu_prog(&value).store(&mut buf[i..]);
+                }
+            }
+            BytesPtr::Cuda(buf) => {
+                let cuda = buf.device();
+                let src_ty = stored_dtype.cuda_type_name();
+                let dst_ty = dtype.cuda_type_name();
+
+                let module_name = std::format!("{}undefer{}", prog_name, dtype.short_name());
+
+                if !cuda.has_func(&module_name, "kernel") {
+                    let kernel_src = std::format!(
+                        r#"
+#include "cuda_fp16.h"
+extern "C" __global__ void kernel(const size_t *info, uint8_t *buf) {{
+    const size_t numel = info[0];
+    const size_t byte_stride = info[1];
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {{
+        auto x = *static_cast<{src_ty} *>(buf + i * byte_stride);
+        {cuda_prog}
+        *static_cast<{dst_ty} *>(buf + i * byte_stride) = x;
+    }}
+}}
+"#
+                    );
+                    let ptx = compile_ptx(kernel_src).unwrap();
+                    cuda.load_ptx(ptx, &module_name, &["kernel"])?;
+                }
+
+                let fwd_fn = cuda.get_func(&module_name, "kernel").unwrap();
+                let info = cuda.htod_copy(vec![numel, byte_stride])?;
+                unsafe { fwd_fn.launch(launch_cfg::<128>(numel as u32), (&info, buf)) }?;
+            }
+            _ => (),
+        };
+
+        self.deferred_ops.clear();
+        self.stored_dtype = self.deferred_dtype;
+
+        Ok(self)
     }
 }

@@ -20,8 +20,7 @@ impl Tensor {
         let tensor_num_bytes = numel * dtype.num_bytes();
 
         let z = {
-            assert!(self.deferred_dtype.num_bytes() <= self.stored_dtype.num_bytes());
-            assert!(other.deferred_dtype.num_bytes() <= other.stored_dtype.num_bytes());
+            assert!(self.deferred_dtype.num_bytes() <= self.byte_stride);
 
             let shape = &self.shape;
 

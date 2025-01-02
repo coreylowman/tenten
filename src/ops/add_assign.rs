@@ -20,63 +20,62 @@ impl Tensor {
         let dtype = self.dtype();
         let numel = self.numel();
 
-        {
-            assert!(self.deferred_dtype.num_bytes() <= self.stored_dtype.num_bytes());
+        assert!(self.deferred_dtype.num_bytes() <= self.byte_stride);
 
-            let x_prog_name = self.get_deferred_program_name();
-            let x_cpu_prog = self.deferred_ops_cpu_closure();
-            let x_cuda_prog = self.deffered_ops_cuda_instructions();
-            self.deferred_ops.clear();
+        let x_prog_name = self.get_deferred_program_name();
+        let x_cpu_prog = self.deferred_ops_cpu_closure();
+        let x_cuda_prog = self.deffered_ops_cuda_instructions();
+        self.deferred_ops.clear();
 
-            let x_storage_dtype = self.stored_dtype;
-            let x_byte_stride = self.byte_stride;
-            let x_strides = self.strides.clone();
-            let shape = &self.shape;
+        let x_storage_dtype = self.stored_dtype;
+        let x_byte_stride = self.byte_stride;
+        let x_strides = self.strides.clone();
+        let shape = &self.shape;
 
-            match (
-                self.bytes_ptr.borrow_mut().deref_mut(),
-                other.bytes_ptr.borrow().deref(),
-            ) {
-                (BytesPtr::Phantom, BytesPtr::Phantom) => (),
-                (BytesPtr::Cpu(x_buf), BytesPtr::Cpu(y_buf)) => {
-                    let x_prog = x_cpu_prog;
-                    let y_prog = other.deferred_ops_cpu_closure();
+        match (
+            self.bytes_ptr.borrow_mut().deref_mut(),
+            other.bytes_ptr.borrow().deref(),
+        ) {
+            (BytesPtr::Phantom, BytesPtr::Phantom) => (),
+            (BytesPtr::Cpu(x_buf), BytesPtr::Cpu(y_buf)) => {
+                let x_prog = x_cpu_prog;
+                let y_prog = other.deferred_ops_cpu_closure();
 
-                    let mut x_idx = CpuIndex::new(shape, &x_strides, x_byte_stride);
-                    let mut y_idx = CpuIndex::new(shape, &other.strides, other.byte_stride);
-                    for _ in 0..numel {
-                        let i_lhs = x_idx.next().unwrap();
-                        let i_rhs = y_idx.next().unwrap();
+                let mut x_idx = CpuIndex::new(shape, &x_strides, x_byte_stride);
+                let mut y_idx = CpuIndex::new(shape, &other.strides, other.byte_stride);
+                for _ in 0..numel {
+                    let i_lhs = x_idx.next().unwrap();
+                    let i_rhs = y_idx.next().unwrap();
 
-                        let x_i = x_storage_dtype.read(&x_buf[i_lhs..]);
-                        let y_i = other.stored_dtype.read(&y_buf[i_rhs..]);
+                    let x_i = x_storage_dtype.read(&x_buf[i_lhs..]);
+                    let y_i = other.stored_dtype.read(&y_buf[i_rhs..]);
 
-                        let x_i = x_prog(&x_i);
-                        let y_i = y_prog(&y_i);
-                        let z_i = x_i + y_i;
+                    let x_i = x_prog(&x_i);
+                    let y_i = y_prog(&y_i);
+                    let z_i = x_i + y_i;
 
-                        z_i.store(&mut x_buf[i_lhs..]);
-                    }
+                    z_i.store(&mut x_buf[i_lhs..]);
                 }
-                (BytesPtr::Cuda(x_buf), BytesPtr::Cuda(y_buf)) => {
-                    let x_buf_ty = x_storage_dtype.cuda_type_name();
-                    let y_buf_ty = other.stored_dtype.cuda_type_name();
-                    let dst_ty = dtype.cuda_type_name();
-                    let x_prog = x_cuda_prog;
-                    let y_prog = other.deffered_ops_cuda_instructions();
+            }
+            (BytesPtr::Cuda(x_buf), BytesPtr::Cuda(y_buf)) => {
+                let x_buf_ty = x_storage_dtype.cuda_type_name();
+                let y_buf_ty = other.stored_dtype.cuda_type_name();
+                let dst_ty = dtype.cuda_type_name();
+                let x_prog = x_cuda_prog;
+                let y_prog = other.deffered_ops_cuda_instructions();
 
-                    let cuda = y_buf.device();
+                let cuda = y_buf.device();
 
-                    let module_name = std::format!(
-                        "{}{}add_assign{}",
-                        x_prog_name,
-                        other.get_deferred_program_name(),
-                        dtype.short_name()
-                    );
+                let module_name = std::format!(
+                    "{}{}add_assign{}",
+                    x_prog_name,
+                    other.get_deferred_program_name(),
+                    dtype.short_name()
+                );
 
-                    if !cuda.has_func(&module_name, "kernel") {
-                        let kernel_src = std::format!(
-                            r#"
+                if !cuda.has_func(&module_name, "kernel") {
+                    let kernel_src = std::format!(
+                        r#"
 #include "cuda_fp16.h"
 
 extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const uint8_t *rhs) {{
@@ -108,28 +107,25 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const 
     }}
 }}
 "#
-                        );
-                        let ptx = compile_ptx(kernel_src).unwrap();
-                        cuda.load_ptx(ptx, &module_name, &["kernel"])?;
-                    }
-
-                    let fwd_fn = cuda.get_func(&module_name, "kernel").unwrap();
-
-                    let mut info = Vec::new();
-                    info.push(numel);
-                    info.push(shape.len());
-                    info.extend(shape);
-                    info.extend(&x_strides);
-                    info.extend(&other.strides);
-                    let info = cuda.htod_copy(info)?;
-
-                    unsafe {
-                        fwd_fn.launch(launch_cfg::<128>(numel as u32), (&info, x_buf, y_buf))
-                    }?;
+                    );
+                    let ptx = compile_ptx(kernel_src).unwrap();
+                    cuda.load_ptx(ptx, &module_name, &["kernel"])?;
                 }
-                _ => unreachable!(),
-            };
-        }
+
+                let fwd_fn = cuda.get_func(&module_name, "kernel").unwrap();
+
+                let mut info = Vec::new();
+                info.push(numel);
+                info.push(shape.len());
+                info.extend(shape);
+                info.extend(&x_strides);
+                info.extend(&other.strides);
+                let info = cuda.htod_copy(info)?;
+
+                unsafe { fwd_fn.launch(launch_cfg::<128>(numel as u32), (&info, x_buf, y_buf)) }?;
+            }
+            _ => unreachable!(),
+        };
 
         Ok(())
     }

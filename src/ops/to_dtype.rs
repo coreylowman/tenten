@@ -20,7 +20,9 @@ impl Tensor {
             }
             Ok(y)
         } else {
-            todo!("can't defer this, need to allocate more or less space")
+            todo!(
+                "we can still defer this, but ops that do undefer need to reallocate in this case."
+            )
         }
     }
 }

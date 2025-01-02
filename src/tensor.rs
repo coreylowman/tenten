@@ -1,3 +1,5 @@
+pub use half::{bf16, f16};
+
 use std::{cell::RefCell, ops::Deref, rc::Rc};
 
 use cudarc::driver::DeviceSlice;
@@ -12,15 +14,6 @@ pub struct Tensor {
     pub(crate) bytes_ptr: Rc<RefCell<BytesPtr>>,
     pub(crate) deferred_ops: Vec<DeferredOp>,
     pub(crate) gradient: Option<Box<Tensor>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct UniqueId(pub(crate) u64);
-
-#[inline(always)]
-pub fn unique_id() -> UniqueId {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    UniqueId(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
 #[non_exhaustive]
@@ -117,6 +110,23 @@ impl Tensor {
         self.gradient.clone().map(|t| *t)
     }
 
+    pub fn set_new_grad(&mut self) -> Option<Tensor> {
+        if let Some(grad) = self.gradient.as_mut() {
+            let bytes_ptr = self.bytes_ptr.borrow().lazy();
+            *grad = Box::new(Tensor {
+                stored_dtype: self.deferred_dtype,
+                deferred_dtype: self.deferred_dtype,
+                shape: self.shape.clone(),
+                strides: self.strides.clone(),
+                byte_stride: self.byte_stride,
+                bytes_ptr: Rc::new(RefCell::new(bytes_ptr)),
+                deferred_ops: Vec::new(),
+                gradient: None,
+            })
+        }
+        self.grad()
+    }
+
     pub fn alloc(self) -> Result<Self, Error> {
         let maybe_alloc = match self.bytes_ptr.borrow().deref() {
             &BytesPtr::Lazy(device, len) => Some((device, len)),
@@ -150,8 +160,6 @@ pub enum Error {
     #[cfg(feature = "cudnn")]
     CudnnError(cudarc::cudnn::CudnnError),
 }
-
-pub use half::{bf16, f16};
 
 #[non_exhaustive]
 #[repr(u8)]
@@ -230,22 +238,22 @@ impl Dtype {
     pub fn read(&self, buf: &[u8]) -> Scalar {
         match self {
             Dtype::Boolean => Scalar::Boolean(buf[0] == 1),
-            Dtype::Float16 => Scalar::Float16(f16::from_ne_bytes([buf[0], buf[1]])),
-            Dtype::BFloat16 => Scalar::BFloat16(bf16::from_ne_bytes([buf[0], buf[1]])),
-            Dtype::Float32 => Scalar::Float32(f32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]])),
-            Dtype::Float64 => Scalar::Float64(f64::from_ne_bytes([
+            Dtype::Float16 => Scalar::Float16(f16::from_le_bytes([buf[0], buf[1]])),
+            Dtype::BFloat16 => Scalar::BFloat16(bf16::from_le_bytes([buf[0], buf[1]])),
+            Dtype::Float32 => Scalar::Float32(f32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])),
+            Dtype::Float64 => Scalar::Float64(f64::from_le_bytes([
                 buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
             ])),
-            Dtype::Int8 => Scalar::Int8(i8::from_ne_bytes([buf[0]])),
-            Dtype::Int16 => Scalar::Int16(i16::from_ne_bytes([buf[0], buf[1]])),
-            Dtype::Int32 => Scalar::Int32(i32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]])),
-            Dtype::Int64 => Scalar::Int64(i64::from_ne_bytes([
+            Dtype::Int8 => Scalar::Int8(i8::from_le_bytes([buf[0]])),
+            Dtype::Int16 => Scalar::Int16(i16::from_le_bytes([buf[0], buf[1]])),
+            Dtype::Int32 => Scalar::Int32(i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])),
+            Dtype::Int64 => Scalar::Int64(i64::from_le_bytes([
                 buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
             ])),
             Dtype::UInt8 => Scalar::UInt8(buf[0]),
-            Dtype::UInt16 => Scalar::UInt16(u16::from_ne_bytes([buf[0], buf[1]])),
-            Dtype::UInt32 => Scalar::UInt32(u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]])),
-            Dtype::UInt64 => Scalar::UInt64(u64::from_ne_bytes([
+            Dtype::UInt16 => Scalar::UInt16(u16::from_le_bytes([buf[0], buf[1]])),
+            Dtype::UInt32 => Scalar::UInt32(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])),
+            Dtype::UInt64 => Scalar::UInt64(u64::from_le_bytes([
                 buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
             ])),
         }
@@ -289,7 +297,7 @@ impl Dtype {
 }
 
 #[non_exhaustive]
-#[derive(Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub enum Scalar {
     Boolean(bool),
     Float16(half::f16),
@@ -306,22 +314,22 @@ pub enum Scalar {
     UInt64(u64),
 }
 
-impl std::fmt::Debug for Scalar {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Scalar {
+    pub fn to_string(&self) -> String {
         match self {
-            Self::Boolean(arg0) => f.write_str(&arg0.to_string()),
-            Self::Float16(arg0) => f.write_str(&arg0.to_string()),
-            Self::BFloat16(arg0) => f.write_str(&arg0.to_string()),
-            Self::Float32(arg0) => f.write_str(&arg0.to_string()),
-            Self::Float64(arg0) => f.write_str(&arg0.to_string()),
-            Self::Int8(arg0) => f.write_str(&arg0.to_string()),
-            Self::Int16(arg0) => f.write_str(&arg0.to_string()),
-            Self::Int32(arg0) => f.write_str(&arg0.to_string()),
-            Self::Int64(arg0) => f.write_str(&arg0.to_string()),
-            Self::UInt8(arg0) => f.write_str(&arg0.to_string()),
-            Self::UInt16(arg0) => f.write_str(&arg0.to_string()),
-            Self::UInt32(arg0) => f.write_str(&arg0.to_string()),
-            Self::UInt64(arg0) => f.write_str(&arg0.to_string()),
+            Scalar::Boolean(x) => x.to_string(),
+            Scalar::Float16(x) => x.to_string(),
+            Scalar::BFloat16(x) => x.to_string(),
+            Scalar::Float32(x) => x.to_string(),
+            Scalar::Float64(x) => x.to_string(),
+            Scalar::Int8(x) => x.to_string(),
+            Scalar::Int16(x) => x.to_string(),
+            Scalar::Int32(x) => x.to_string(),
+            Scalar::Int64(x) => x.to_string(),
+            Scalar::UInt8(x) => x.to_string(),
+            Scalar::UInt16(x) => x.to_string(),
+            Scalar::UInt32(x) => x.to_string(),
+            Scalar::UInt64(x) => x.to_string(),
         }
     }
 }
@@ -350,18 +358,18 @@ impl Scalar {
     pub fn store(&self, buf: &mut [u8]) {
         match self {
             Scalar::Boolean(x) => buf[0] = *x as u8,
-            Scalar::Float16(x) => buf[..2].clone_from_slice(&x.to_ne_bytes()),
-            Scalar::BFloat16(x) => buf[..2].clone_from_slice(&x.to_ne_bytes()),
-            Scalar::Float32(x) => buf[..4].clone_from_slice(&x.to_ne_bytes()),
-            Scalar::Float64(x) => buf[..8].clone_from_slice(&x.to_ne_bytes()),
+            Scalar::Float16(x) => buf[..2].clone_from_slice(&x.to_le_bytes()),
+            Scalar::BFloat16(x) => buf[..2].clone_from_slice(&x.to_le_bytes()),
+            Scalar::Float32(x) => buf[..4].clone_from_slice(&x.to_le_bytes()),
+            Scalar::Float64(x) => buf[..8].clone_from_slice(&x.to_le_bytes()),
             Scalar::Int8(x) => buf[0] = *x as u8,
-            Scalar::Int16(x) => buf[..2].clone_from_slice(&x.to_ne_bytes()),
-            Scalar::Int32(x) => buf[..4].clone_from_slice(&x.to_ne_bytes()),
-            Scalar::Int64(x) => buf[..8].clone_from_slice(&x.to_ne_bytes()),
+            Scalar::Int16(x) => buf[..2].clone_from_slice(&x.to_le_bytes()),
+            Scalar::Int32(x) => buf[..4].clone_from_slice(&x.to_le_bytes()),
+            Scalar::Int64(x) => buf[..8].clone_from_slice(&x.to_le_bytes()),
             Scalar::UInt8(x) => buf[0] = *x,
-            Scalar::UInt16(x) => buf[..2].clone_from_slice(&x.to_ne_bytes()),
-            Scalar::UInt32(x) => buf[..4].clone_from_slice(&x.to_ne_bytes()),
-            Scalar::UInt64(x) => buf[..8].clone_from_slice(&x.to_ne_bytes()),
+            Scalar::UInt16(x) => buf[..2].clone_from_slice(&x.to_le_bytes()),
+            Scalar::UInt32(x) => buf[..4].clone_from_slice(&x.to_le_bytes()),
+            Scalar::UInt64(x) => buf[..8].clone_from_slice(&x.to_le_bytes()),
         }
     }
 }

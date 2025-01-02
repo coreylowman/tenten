@@ -1,4 +1,4 @@
-use crate::{tensor::*};
+use crate::tensor::*;
 
 impl Tensor {
     pub fn sub_scalar<S: Into<Scalar>>(self, scalar: S) -> Result<Self, Error> {

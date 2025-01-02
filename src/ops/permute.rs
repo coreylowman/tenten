@@ -1,7 +1,12 @@
-use crate::tensor::*;
+use crate::{tensor::*, util::all_some};
 
 impl Tensor {
-    pub fn permute(mut self, order: &[isize]) -> Result<Self, Error> {
+    pub fn permute<Order>(mut self, order: Order) -> Result<Self, Error>
+    where
+        Order: Into<Vec<isize>>,
+    {
+        let order = Into::<Vec<isize>>::into(order);
+
         let num_dims = self.shape.len();
 
         assert_eq!(num_dims, order.len());
@@ -27,6 +32,13 @@ impl Tensor {
         }
         self.shape = new_shape;
         self.strides = new_strides;
+
+        if let Some([x_grad, y_grad]) = all_some([self.grad(), self.set_new_grad()]) {
+            crate::backward::record_op(move || {
+                let y_grad = y_grad.permute(order)?;
+                x_grad.alloc()?.add_assign(y_grad)
+            });
+        }
 
         Ok(self)
     }
