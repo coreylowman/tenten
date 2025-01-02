@@ -20,11 +20,10 @@ impl Tensor {
         let tensor_num_bytes = numel * dtype.num_bytes();
 
         let z = {
-            assert!(self.deferred_dtype.num_bytes() <= self.byte_stride);
-
             let shape = &self.shape;
 
-            let z_strides = crate::init::nd_bytes_strides(shape, dtype.num_bytes());
+            let byte_stride = dtype.num_bytes();
+            let z_strides = crate::init::nd_bytes_strides(shape, byte_stride);
 
             let bytes = match (
                 self.bytes_ptr.borrow().deref(),
@@ -51,7 +50,7 @@ impl Tensor {
                         let y_i = y_prog(&y_i);
                         let z_i = x_i * y_i;
 
-                        z_i.store(&mut z_buf[i_out..]);
+                        z_i.store(&mut z_buf[i_out * byte_stride..]);
                     }
                     BytesPtr::Cpu(z_buf)
                 }
@@ -81,9 +80,10 @@ impl Tensor {
 extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const uint8_t *rhs, uint8_t *out) {{
     const size_t numel = info[0];
     const size_t num_dims = info[1];
-    const size_t *dims = info + 2;
-    const size_t *lhs_strides = info + 2 + num_dims;
-    const size_t *rhs_strides = info + 2 + 2 * num_dims;
+    const size_t byte_stride = info[2]
+    const size_t *dims = info + 3;
+    const size_t *lhs_strides = info + 3 + num_dims;
+    const size_t *rhs_strides = info + 3 + 2 * num_dims;
     for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {{
         size_t tmp_i = i;
         size_t lhs_i = 0;
@@ -103,7 +103,7 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const 
         {y_prog}
         auto rhs = x;
 
-        *static_cast<{dst_ty} *>(out + i) = lhs * rhs;
+        *static_cast<{dst_ty} *>(out + i * byte_stride) = lhs * rhs;
     }}
 }}
 "#
@@ -117,6 +117,7 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const 
                     let mut info = Vec::new();
                     info.push(numel);
                     info.push(shape.len());
+                    info.push(byte_stride);
                     info.extend(shape);
                     info.extend(&self.strides);
                     info.extend(&other.strides);

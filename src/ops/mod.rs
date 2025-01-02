@@ -6,6 +6,7 @@ mod all_close;
 mod and;
 mod broadcast_along;
 mod choose;
+mod chunk_along;
 mod clamp;
 mod concat_along;
 mod cos;
@@ -74,3 +75,6 @@ mod to_device;
 mod to_dtype;
 mod var_along;
 mod xor;
+
+pub use concat_along::concat_along;
+pub use stack::stack;
