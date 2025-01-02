@@ -493,7 +493,7 @@ impl Tensor {
     {
         let dtype = self.dtype();
         assert_eq!(dtype, dtype_of::<T>());
-        let t = self.undefer()?.to_device(Device::Cpu)?;
+        let t = self.undeferred()?.to_device(Device::Cpu)?;
         let mut out = Vec::with_capacity(t.numel());
         match t.bytes_ptr.borrow().deref() {
             BytesPtr::Cpu(buf) => {

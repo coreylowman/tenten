@@ -28,3 +28,18 @@ impl Tensor {
         Ok(y)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{init::*, tensor::*, tests::*};
+
+    #[test]
+    fn test_recip() -> Result<(), Error> {
+        set_default_device(TEST_DEVICE);
+        let x = Tensor::from([1.0, 0.5, 2.0]).to_dtype(TEST_DTYPE)?;
+        assert_all_close(
+            &x.recip()?.to_dtype(Dtype::Float32)?.into_vec()?,
+            &[1.0f32, 2.0, 0.5],
+        )
+    }
+}

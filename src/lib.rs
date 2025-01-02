@@ -32,7 +32,7 @@ pub(crate) mod tests {
     pub const RTOL: TestDtype = 1e-5;
     pub const ATOL: TestDtype = 1e-8;
 
-    pub fn assert_all_close(a: &[TestDtype], b: &[TestDtype]) {
+    pub fn assert_all_close(a: &[TestDtype], b: &[TestDtype]) -> Result<(), crate::tensor::Error> {
         for (x, y) in a.iter().zip(b.iter()) {
             let close = if x.is_nan() {
                 y.is_nan()
@@ -42,8 +42,9 @@ pub(crate) mod tests {
                 y.is_finite() && (x - y).abs() <= ATOL + RTOL * y.abs()
             };
             if !close {
-                panic!("diff on {x:?} | {y:?}");
+                panic!("diff between {a:?} {b:?}");
             }
         }
+        Ok(())
     }
 }

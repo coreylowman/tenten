@@ -43,7 +43,7 @@ impl<'a> CpuIndex<'a> {
     #[inline]
     pub(crate) fn new(shape: &'a [usize], strides: &'a [usize], byte_stride: usize) -> Self {
         Self {
-            indices: Default::default(),
+            indices: vec![0; shape.len()],
             shape,
             strides,
             next: if shape.len() > 0 { Some(0) } else { None },

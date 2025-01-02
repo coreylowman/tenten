@@ -42,7 +42,6 @@ mod tests {
     #[test]
     fn test_abs() -> Result<(), Error> {
         set_default_device(TEST_DEVICE);
-        set_default_dtype(TEST_DTYPE);
 
         let x = Tensor::from([
             -1.0,
@@ -64,7 +63,6 @@ mod tests {
                 TestDtype::INFINITY,
                 TestDtype::NAN,
             ],
-        );
-        Ok(())
+        )
     }
 }

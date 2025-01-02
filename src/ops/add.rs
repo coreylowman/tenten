@@ -21,7 +21,8 @@ impl Tensor {
         let z = {
             let shape = &self.shape;
 
-            let z_strides = crate::init::nd_bytes_strides(shape, dtype.num_bytes());
+            let byte_stride = dtype.num_bytes();
+            let z_strides = crate::init::nd_bytes_strides(shape, byte_stride);
 
             let bytes = match (
                 self.bytes_ptr.borrow().deref(),
@@ -41,14 +42,11 @@ impl Tensor {
                         let i_lhs = x_idx.next().unwrap();
                         let i_rhs = y_idx.next().unwrap();
 
-                        let x_i = self.stored_dtype.read(&x_buf[i_lhs..]);
-                        let y_i = other.stored_dtype.read(&y_buf[i_rhs..]);
+                        let x = self.stored_dtype.read(&x_buf[i_lhs..]);
+                        let y = other.stored_dtype.read(&y_buf[i_rhs..]);
+                        let z = x_prog(&x) + y_prog(&y);
 
-                        let x_i = x_prog(&x_i);
-                        let y_i = y_prog(&y_i);
-                        let z_i = x_i + y_i;
-
-                        z_i.store(&mut z_buf[i_out..]);
+                        z.store(&mut z_buf[i_out * byte_stride..]);
                     }
                     BytesPtr::Cpu(z_buf)
                 }
@@ -78,9 +76,10 @@ impl Tensor {
 extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const uint8_t *rhs, uint8_t *out) {{
     const size_t numel = info[0];
     const size_t num_dims = info[1];
-    const size_t *dims = info + 2;
-    const size_t *lhs_strides = info + 2 + num_dims;
-    const size_t *rhs_strides = info + 2 + 2 * num_dims;
+    const size_t byte_stride = info[2];
+    const size_t *dims = info + 3;
+    const size_t *lhs_strides = info + 3 + num_dims;
+    const size_t *rhs_strides = info + 3 + 2 * num_dims;
     for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {{
         size_t tmp_i = i;
         size_t lhs_i = 0;
@@ -100,7 +99,7 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const 
         {y_prog}
         auto rhs = x;
 
-        *static_cast<{dst_ty} *>(out + i) = lhs + rhs;
+        *static_cast<{dst_ty} *>(out + i * byte_stride) = lhs + rhs;
     }}
 }}
 "#
@@ -114,6 +113,7 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const 
                     let mut info = Vec::new();
                     info.push(numel);
                     info.push(shape.len());
+                    info.push(dtype.num_bytes());
                     info.extend(shape);
                     info.extend(&self.strides);
                     info.extend(&other.strides);
@@ -148,5 +148,27 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const 
         }
 
         Ok(z)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{init::*, tensor::*, tests::*};
+
+    #[test]
+    fn test_add() -> Result<(), Error> {
+        set_default_device(TEST_DEVICE);
+
+        let x = Tensor::from([-3.0f32, 0.0, 3.0]).to_dtype(TEST_DTYPE)?;
+        let y = Tensor::from([1.0f32, 0.5, 2.0]).to_dtype(TEST_DTYPE)?;
+
+        let z = x
+            .broadcast_along(0, 3)?
+            .add(y.broadcast_along(1, 3)?.recip()?)?;
+
+        assert_all_close(
+            &z.to_dtype(Dtype::Float32)?.into_vec()?,
+            &[-2.0f32, 1., 4., -1., 2., 5., -2.5, 0.5, 3.5],
+        )
     }
 }
