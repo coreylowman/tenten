@@ -7,14 +7,13 @@ use crate::{tensor::*, util::launch_cfg};
 impl Tensor {
     #[inline(always)]
     pub fn defer_op(mut self, name: &str, cpu_op: fn(&Scalar) -> Scalar, cuda_op: &str) -> Self {
+        self.id = monotonically_increasing_id();
         self.deferred_ops.push(DeferredOp {
             name: name.into(),
             cpu_op: cpu_op.into(),
             cuda_op: cuda_op.into(),
         });
-        if let Some(grad) = self.gradient.as_mut() {
-            grad.bytes = Rc::new(RefCell::new(self.bytes.borrow().lazy()));
-        }
+        self.set_new_grad();
         self
     }
 
@@ -25,14 +24,13 @@ impl Tensor {
         cpu_op: (fn(&Scalar, &[Scalar]) -> Scalar, Vec<Scalar>),
         cuda_op: CudaOp,
     ) -> Self {
+        self.id = monotonically_increasing_id();
         self.deferred_ops.push(DeferredOp {
             name: name.into(),
             cpu_op: cpu_op.into(),
             cuda_op: cuda_op.into(),
         });
-        if let Some(grad) = self.gradient.as_mut() {
-            grad.bytes = Rc::new(RefCell::new(self.bytes.borrow().lazy()));
-        }
+        self.set_new_grad();
         self
     }
 
