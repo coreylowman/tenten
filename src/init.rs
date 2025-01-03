@@ -133,7 +133,7 @@ where
     let numel: usize = shape.iter().product();
     let num_bytes = numel * dtype.num_bytes();
     let bytes = match device {
-        Device::Phantom => BytesPtr::Phantom,
+        Device::Ghost => BytesPtr::Ghost(device, num_bytes),
         Device::Cpu => BytesPtr::Cpu(vec![0; num_bytes]),
         Device::Cuda(dev) => {
             let cuda = crate::util::thread_cuda(dev);
@@ -152,10 +152,9 @@ where
 pub fn zeros_like(x: &Tensor) -> Result<Tensor, Error> {
     let dtype = x.dtype();
     let bytes = match x.bytes.borrow().deref() {
-        BytesPtr::Phantom => BytesPtr::Phantom,
-        &BytesPtr::Lazy(Device::Phantom, _) => BytesPtr::Phantom,
-        &BytesPtr::Lazy(Device::Cpu, len) => BytesPtr::Cpu(vec![0; len]),
-        &BytesPtr::Lazy(Device::Cuda(ordinal), len) => {
+        &BytesPtr::Ghost(Device::Ghost, len) => BytesPtr::Ghost(Device::Ghost, len),
+        &BytesPtr::Ghost(Device::Cpu, len) => BytesPtr::Cpu(vec![0; len]),
+        &BytesPtr::Ghost(Device::Cuda(ordinal), len) => {
             BytesPtr::Cuda(crate::util::thread_cuda(ordinal).alloc_zeros(len)?)
         }
         BytesPtr::Cpu(src) => BytesPtr::Cpu(vec![0; src.len()]),
@@ -184,7 +183,7 @@ where
     let numel: usize = shape.iter().product();
     let num_bytes = numel * dtype.num_bytes();
     let bytes = match device {
-        Device::Phantom => BytesPtr::Phantom,
+        Device::Ghost => BytesPtr::Ghost(device, num_bytes),
         Device::Cpu => BytesPtr::Cpu(vec![0; num_bytes]),
         Device::Cuda(dev) => {
             let cuda = crate::util::thread_cuda(dev);
@@ -203,8 +202,7 @@ where
 pub unsafe fn empty_like(x: &Tensor) -> Result<Tensor, Error> {
     let dtype = x.dtype();
     let bytes = match x.bytes.borrow().deref() {
-        BytesPtr::Phantom => BytesPtr::Phantom,
-        &BytesPtr::Lazy(dev, len) => BytesPtr::Lazy(dev, len),
+        &BytesPtr::Ghost(dev, len) => BytesPtr::Ghost(dev, len),
         BytesPtr::Cpu(src) => BytesPtr::Cpu(vec![0; src.len()]),
         BytesPtr::Cuda(src) => {
             let cuda = src.device();
@@ -239,7 +237,7 @@ where
     }
 
     let bytes = match device {
-        Device::Phantom => BytesPtr::Phantom,
+        Device::Ghost => BytesPtr::Ghost(device, num_bytes),
         Device::Cpu => BytesPtr::Cpu(init_buf),
         Device::Cuda(ordinal) => {
             let cuda = crate::util::thread_cuda(ordinal);
@@ -289,7 +287,7 @@ where
     }
 
     let bytes = match device {
-        Device::Phantom => BytesPtr::Phantom,
+        Device::Ghost => BytesPtr::Ghost(device, num_bytes),
         Device::Cpu => BytesPtr::Cpu(init_buf),
         Device::Cuda(ordinal) => {
             let cuda = crate::util::thread_cuda(ordinal);
@@ -333,7 +331,7 @@ pub fn sample_uniform_like(x: &Tensor) -> Result<Tensor, Error> {
     }
 
     let bytes = match x.device() {
-        Device::Phantom => BytesPtr::Phantom,
+        Device::Ghost => BytesPtr::Ghost(Device::Ghost, num_bytes),
         Device::Cpu => BytesPtr::Cpu(init_buf),
         Device::Cuda(ordinal) => {
             let cuda = crate::util::thread_cuda(ordinal);
@@ -387,7 +385,7 @@ where
     }
 
     let bytes = match device {
-        Device::Phantom => BytesPtr::Phantom,
+        Device::Ghost => BytesPtr::Ghost(device, num_bytes),
         Device::Cpu => BytesPtr::Cpu(init_buf),
         Device::Cuda(ordinal) => {
             let cuda = crate::util::thread_cuda(ordinal);
@@ -426,7 +424,7 @@ where
     }
 
     let bytes = match x.device() {
-        Device::Phantom => BytesPtr::Phantom,
+        Device::Ghost => BytesPtr::Ghost(Device::Ghost, num_bytes),
         Device::Cpu => BytesPtr::Cpu(init_buf),
         Device::Cuda(ordinal) => {
             let cuda = crate::util::thread_cuda(ordinal);
@@ -469,7 +467,7 @@ where
     }
 
     let bytes = match device {
-        Device::Phantom => BytesPtr::Phantom,
+        Device::Ghost => BytesPtr::Ghost(device, num_bytes),
         Device::Cpu => BytesPtr::Cpu(init_buf),
         Device::Cuda(ordinal) => {
             let cuda = crate::util::thread_cuda(ordinal);

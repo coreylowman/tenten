@@ -19,15 +19,14 @@ pub struct Tensor {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum BytesPtr {
-    Phantom,
-    Lazy(Device, usize),
+    Ghost(Device, usize),
     Cpu(Vec<u8>),
     Cuda(cudarc::driver::CudaSlice<u8>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Device {
-    Phantom,
+    Ghost,
     Cpu,
     Cuda(usize),
 }
@@ -60,10 +59,9 @@ impl From<(fn(&Scalar, &[Scalar]) -> Scalar, Vec<Scalar>)> for CpuOpPtr {
 impl BytesPtr {
     pub fn lazy(&self) -> Self {
         match self {
-            BytesPtr::Phantom => BytesPtr::Phantom,
-            BytesPtr::Lazy(device, len) => BytesPtr::Lazy(*device, *len),
-            BytesPtr::Cpu(vec) => BytesPtr::Lazy(Device::Cpu, vec.len()),
-            BytesPtr::Cuda(cuda_slice) => BytesPtr::Lazy(
+            BytesPtr::Ghost(device, len) => BytesPtr::Ghost(*device, *len),
+            BytesPtr::Cpu(vec) => BytesPtr::Ghost(Device::Cpu, vec.len()),
+            BytesPtr::Cuda(cuda_slice) => BytesPtr::Ghost(
                 Device::Cuda(cuda_slice.device().ordinal()),
                 cuda_slice.len(),
             ),
@@ -86,8 +84,7 @@ impl Tensor {
 
     pub fn device(&self) -> Device {
         match self.bytes.borrow().deref() {
-            BytesPtr::Phantom => Device::Phantom,
-            BytesPtr::Lazy(device, _) => *device,
+            BytesPtr::Ghost(device, _) => *device,
             BytesPtr::Cpu(_) => Device::Cpu,
             BytesPtr::Cuda(buf) => Device::Cuda(buf.device().ordinal()),
         }
@@ -129,7 +126,7 @@ impl Tensor {
 
     pub fn alloc(self) -> Result<Self, Error> {
         let maybe_alloc = match self.bytes.borrow().deref() {
-            &BytesPtr::Lazy(device, len) => Some((device, len)),
+            &BytesPtr::Ghost(device, len) => Some((device, len)),
             _ => None,
         };
         let (device, len) = match maybe_alloc {
@@ -137,7 +134,7 @@ impl Tensor {
             None => return Ok(self),
         };
         *self.bytes.borrow_mut() = match device {
-            Device::Phantom => BytesPtr::Phantom,
+            Device::Ghost => BytesPtr::Ghost(device, len),
             Device::Cpu => BytesPtr::Cpu(vec![0u8; len]),
             Device::Cuda(ordinal) => {
                 let cuda = crate::util::thread_cuda(ordinal);

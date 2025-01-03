@@ -25,7 +25,7 @@ impl Tensor {
         let z_strides = crate::init::nd_bytes_strides(shape, byte_stride);
 
         let bytes = match (self.bytes.borrow().deref(), other.bytes.borrow().deref()) {
-            (BytesPtr::Phantom, BytesPtr::Phantom) => BytesPtr::Phantom,
+            (&BytesPtr::Ghost(d, l), _) => BytesPtr::Ghost(d, l),
             (BytesPtr::Cpu(x_buf), BytesPtr::Cpu(y_buf)) => {
                 let x_prog = self.deferred_ops_cpu_closure();
                 let y_prog = other.deferred_ops_cpu_closure();

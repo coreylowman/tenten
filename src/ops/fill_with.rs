@@ -13,8 +13,7 @@ impl Tensor {
         let value = Into::<Scalar>::into(scalar).to_dtype(dtype);
 
         match Rc::make_mut(&mut self.bytes).borrow_mut().deref_mut() {
-            BytesPtr::Phantom => (),
-            BytesPtr::Lazy(_, _) => (),
+            BytesPtr::Ghost(_, _) => (),
             BytesPtr::Cpu(buf) => {
                 for i in (0..buf.len()).step_by(dtype.num_bytes()) {
                     value.store(&mut buf[i..]);

@@ -36,7 +36,7 @@ impl Tensor {
             Rc::make_mut(&mut self.bytes).borrow_mut().deref_mut(),
             other.bytes.borrow().deref(),
         ) {
-            (BytesPtr::Phantom, BytesPtr::Phantom) => (),
+            (BytesPtr::Ghost(_, _), _) => (),
             (BytesPtr::Cpu(x_buf), BytesPtr::Cpu(y_buf)) => {
                 let x_prog = x_cpu_prog;
                 let y_prog = other.deferred_ops_cpu_closure();

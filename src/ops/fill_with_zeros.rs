@@ -5,8 +5,7 @@ use crate::tensor::*;
 impl Tensor {
     pub fn fill_with_zeros(&mut self) -> Result<(), Error> {
         match Rc::make_mut(&mut self.bytes).borrow_mut().deref_mut() {
-            BytesPtr::Phantom => (),
-            BytesPtr::Lazy(_, _) => (),
+            BytesPtr::Ghost(_, _) => (),
             BytesPtr::Cpu(buf) => buf.fill(0),
             BytesPtr::Cuda(buf) => buf.device().memset_zeros(buf)?,
         }
