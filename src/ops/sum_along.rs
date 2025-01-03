@@ -29,7 +29,7 @@ impl Tensor {
 
             let bytes = match self.bytes.borrow().deref() {
                 BytesPtr::Cpu(x_buf) => {
-                    let prog = self.deferred_ops_cpu_closure();
+                    let prog = self.build_cpu_op();
 
                     let mut y_buf = vec![0; y_num_bytes];
 
@@ -53,17 +53,14 @@ impl Tensor {
                 BytesPtr::Cuda(x_buf) => {
                     let cuda = x_buf.device();
 
-                    let prog = self.deffered_ops_cuda_instructions();
+                    let prog = self.build_cuda_op();
                     let x_buf_ty = self.stored_dtype.cuda_type_name();
                     let dst_ty = dtype.cuda_type_name();
 
                     let mut y_buf = cuda.alloc_zeros(y_num_bytes)?;
 
-                    let module_name = std::format!(
-                        "{}sum{ax:?}{}",
-                        self.get_deferred_program_name(),
-                        dtype.short_name()
-                    );
+                    let module_name =
+                        std::format!("{}sum{ax:?}{}", self.build_op_name(), dtype.short_name());
 
                     if !cuda.has_func(&module_name, "kernel") {
                         let kernel_src = std::format!(

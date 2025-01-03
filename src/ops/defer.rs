@@ -1,4 +1,4 @@
-use std::{cell::RefCell, ops::DerefMut, rc::Rc};
+use std::{ops::DerefMut, rc::Rc};
 
 use cudarc::{driver::LaunchAsync, nvrtc::compile_ptx};
 
@@ -34,7 +34,7 @@ impl Tensor {
         self
     }
 
-    pub fn get_deferred_program_name(&self) -> String {
+    pub fn build_op_name(&self) -> String {
         self.deferred_ops
             .iter()
             .map(|op| op.name.clone())
@@ -43,7 +43,7 @@ impl Tensor {
     }
 
     #[inline]
-    pub fn deferred_ops_cpu_closure(&self) -> impl Fn(&Scalar) -> Scalar {
+    pub fn build_cpu_op(&self) -> impl Fn(&Scalar) -> Scalar {
         let ops: Vec<CpuOpPtr> = self
             .deferred_ops
             .iter()
@@ -60,7 +60,9 @@ impl Tensor {
             x
         }
     }
-    pub fn deffered_ops_cuda_instructions(&self) -> String {
+
+    #[inline]
+    pub fn build_cuda_op(&self) -> String {
         let mut prog = String::new();
         for op in self.deferred_ops.iter() {
             if op.cuda_op.contains("=") {
@@ -85,9 +87,9 @@ impl Tensor {
         let dtype = self.deferred_dtype;
         let numel = self.numel();
 
-        let prog_name = self.get_deferred_program_name();
-        let cpu_prog = self.deferred_ops_cpu_closure();
-        let cuda_prog = self.deffered_ops_cuda_instructions();
+        let prog_name = self.build_op_name();
+        let cpu_prog = self.build_cpu_op();
+        let cuda_prog = self.build_cuda_op();
 
         match Rc::make_mut(&mut self.bytes).borrow_mut().deref_mut() {
             BytesPtr::Cpu(buf) => {

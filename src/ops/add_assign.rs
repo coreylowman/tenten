@@ -24,9 +24,9 @@ impl Tensor {
 
         assert!(self.deferred_dtype.num_bytes() <= self.byte_stride);
 
-        let x_prog_name = self.get_deferred_program_name();
-        let x_cpu_prog = self.deferred_ops_cpu_closure();
-        let x_cuda_prog = self.deffered_ops_cuda_instructions();
+        let x_prog_name = self.build_op_name();
+        let x_cpu_prog = self.build_cpu_op();
+        let x_cuda_prog = self.build_cuda_op();
         self.deferred_ops.clear();
 
         let x_storage_dtype = self.stored_dtype;
@@ -41,7 +41,7 @@ impl Tensor {
             (BytesPtr::Ghost(_, _), _) => (),
             (BytesPtr::Cpu(x_buf), BytesPtr::Cpu(y_buf)) => {
                 let x_prog = x_cpu_prog;
-                let y_prog = other.deferred_ops_cpu_closure();
+                let y_prog = other.build_cpu_op();
 
                 let mut x_idx = CpuIndex::new(shape, &x_strides, x_byte_stride);
                 let mut y_idx = CpuIndex::new(shape, &other.strides, other.byte_stride);
@@ -64,14 +64,14 @@ impl Tensor {
                 let y_buf_ty = other.stored_dtype.cuda_type_name();
                 let dst_ty = dtype.cuda_type_name();
                 let x_prog = x_cuda_prog;
-                let y_prog = other.deffered_ops_cuda_instructions();
+                let y_prog = other.build_cuda_op();
 
                 let cuda = y_buf.device();
 
                 let module_name = std::format!(
                     "{}{}add_assign{}",
                     x_prog_name,
-                    other.get_deferred_program_name(),
+                    other.build_op_name(),
                     dtype.short_name()
                 );
 

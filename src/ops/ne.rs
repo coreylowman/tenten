@@ -30,8 +30,8 @@ impl Tensor {
         let bytes = match (self.bytes.borrow().deref(), other.bytes.borrow().deref()) {
             (&BytesPtr::Ghost(d, l), _) => BytesPtr::Ghost(d, l),
             (BytesPtr::Cpu(x_buf), BytesPtr::Cpu(y_buf)) => {
-                let x_prog = self.deferred_ops_cpu_closure();
-                let y_prog = other.deferred_ops_cpu_closure();
+                let x_prog = self.build_cpu_op();
+                let y_prog = other.build_cpu_op();
 
                 let mut z_buf = vec![0; tensor_num_bytes];
 
@@ -53,8 +53,8 @@ impl Tensor {
                 let x_buf_ty = self.stored_dtype.cuda_type_name();
                 let y_buf_ty = other.stored_dtype.cuda_type_name();
                 let dst_ty = dtype.cuda_type_name();
-                let x_prog = self.deffered_ops_cuda_instructions();
-                let y_prog = other.deffered_ops_cuda_instructions();
+                let x_prog = self.build_cuda_op();
+                let y_prog = other.build_cuda_op();
 
                 let cuda = x_buf.device();
 
@@ -62,8 +62,8 @@ impl Tensor {
 
                 let module_name = std::format!(
                     "{}{}ne{}",
-                    self.get_deferred_program_name(),
-                    other.get_deferred_program_name(),
+                    self.build_op_name(),
+                    other.build_op_name(),
                     dtype.short_name()
                 );
 
