@@ -20,8 +20,11 @@ impl Tensor {
             Ok(self)
         } else if self.strides == nd_bytes_strides(&self.shape, self.byte_stride) {
             // already contiguous, just change shape & strides
+
+            self.id = monotonically_increasing_id();
             self.strides = nd_bytes_strides(&shape, self.byte_stride);
             self.shape = shape;
+
             if let Some([x_grad, y_grad]) = all_some([self.grad(), self.set_new_grad()]) {
                 crate::backward::record_op(move || {
                     let y_grad = y_grad.reshape_like(&x_grad)?;

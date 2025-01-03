@@ -6,14 +6,24 @@ use cudarc::driver::DeviceSlice;
 
 #[derive(Debug, Clone)]
 pub struct Tensor {
-    pub(crate) stored_dtype: Dtype,
-    pub(crate) deferred_dtype: Dtype,
-    pub(crate) shape: Vec<usize>,
-    pub(crate) strides: Vec<usize>,
-    pub(crate) byte_stride: usize,
-    pub(crate) bytes: Rc<RefCell<BytesPtr>>,
-    pub(crate) deferred_ops: Vec<DeferredOp>,
-    pub(crate) gradient: Option<Box<Tensor>>,
+    pub id: MonotonicallyIncreasingId,
+    pub stored_dtype: Dtype,
+    pub deferred_dtype: Dtype,
+    pub shape: Vec<usize>,
+    pub strides: Vec<usize>,
+    pub byte_stride: usize,
+    pub bytes: Rc<RefCell<BytesPtr>>,
+    pub deferred_ops: Vec<DeferredOp>,
+    pub gradient: Option<Box<Tensor>>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MonotonicallyIncreasingId(pub(crate) u64);
+
+#[inline(always)]
+pub fn monotonically_increasing_id() -> MonotonicallyIncreasingId {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    MonotonicallyIncreasingId(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
 #[non_exhaustive]
@@ -111,6 +121,7 @@ impl Tensor {
         if let Some(grad) = self.gradient.as_mut() {
             let bytes_ptr = self.bytes.borrow().lazy();
             *grad = Box::new(Tensor {
+                id: monotonically_increasing_id(),
                 stored_dtype: self.deferred_dtype,
                 deferred_dtype: self.deferred_dtype,
                 shape: self.shape.clone(),

@@ -30,6 +30,8 @@ impl Tensor {
             new_strides[i] = new_dim;
             new_shape[i] = self.shape[new_dim];
         }
+
+        self.id = monotonically_increasing_id();
         self.shape = new_shape;
         self.strides = new_strides;
 

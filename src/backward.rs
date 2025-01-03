@@ -9,15 +9,6 @@ pub(crate) struct Tape {
     )>,
 }
 
-#[derive(Debug, Clone)]
-pub struct MonotonicallyIncreasingId(pub(crate) u64);
-
-#[inline(always)]
-pub fn monotonically_increasing_id() -> MonotonicallyIncreasingId {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    MonotonicallyIncreasingId(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
-}
-
 thread_local! {
     pub(crate) static TAPE: RefCell<Tape> = const {
         RefCell::new(Tape {

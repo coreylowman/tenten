@@ -4,6 +4,8 @@ impl Tensor {
     pub fn broadcast_along<A: Into<Axis>>(mut self, axis: A, size: usize) -> Result<Self, Error> {
         let axis = Into::<Axis>::into(axis);
         let dim = axis.to_usize(self.shape.len() + 1);
+
+        self.id = monotonically_increasing_id();
         self.shape.insert(dim, size);
         self.strides.insert(dim, 0);
 
@@ -19,6 +21,7 @@ impl Tensor {
         let tgt_shape = other.shape();
         let dim = axis.to_usize(self.shape.len() + 1);
 
+        self.id = monotonically_increasing_id();
         self.shape.insert(dim, tgt_shape[dim]);
         self.strides.insert(dim, 0);
 

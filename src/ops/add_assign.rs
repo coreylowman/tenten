@@ -9,6 +9,8 @@ use crate::{tensor::*, util::*};
 
 impl Tensor {
     pub fn add_assign(&mut self, other: Self) -> Result<(), Error> {
+        let _no_grad = crate::backward::no_grad();
+
         if self.is_same_as(&other) {
             todo!()
         }
@@ -126,15 +128,6 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const 
             }
             _ => unreachable!(),
         };
-
-        if let Some([x_grad, y_grad, z_grad]) =
-            all_some([self.grad(), other.grad(), self.set_new_grad()])
-        {
-            crate::backward::record_op(move || {
-                x_grad.alloc()?.add_assign(z_grad.clone())?;
-                y_grad.alloc()?.add_assign(z_grad)
-            });
-        }
 
         Ok(())
     }

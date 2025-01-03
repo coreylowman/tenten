@@ -100,6 +100,7 @@ pub fn build_tensor(
 ) -> Tensor {
     let lazy = bytes.lazy();
     Tensor {
+        id: monotonically_increasing_id(),
         stored_dtype: dtype,
         deferred_dtype: dtype,
         shape: shape.clone(),
@@ -109,6 +110,7 @@ pub fn build_tensor(
         deferred_ops: Vec::new(),
         gradient: requires_grad.then(|| {
             Box::new(Tensor {
+                id: monotonically_increasing_id(),
                 stored_dtype: dtype,
                 deferred_dtype: dtype,
                 shape,
