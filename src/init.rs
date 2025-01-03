@@ -1,12 +1,12 @@
 use std::ops::Deref;
 use std::{cell::RefCell, rc::Rc};
 
-use cudarc::driver::DeviceSlice;
+use cudarc::driver::{DeviceSlice, LaunchAsync};
 use rand::Rng;
 use rand_distr::{Distribution, StandardNormal};
 
 use crate::tensor::*;
-use crate::util::CpuIndex;
+use crate::util::{jit_compile, launch_cfg, CpuIndex};
 
 thread_local! {
     pub(crate) static DEFAULT_DTYPE: RefCell<Dtype> = const {
@@ -233,17 +233,44 @@ where
     let numel: usize = shape.iter().product();
     let num_bytes = numel * dtype.num_bytes();
 
-    let mut init_buf = vec![0; num_bytes];
-    for i in (0..num_bytes).step_by(dtype.num_bytes()) {
-        value.store(&mut init_buf[i..]);
-    }
-
     let bytes = match device {
         Device::Ghost => BytesPtr::Ghost(device, num_bytes),
-        Device::Cpu => BytesPtr::Cpu(init_buf),
+        Device::Cpu => {
+            let mut buf = vec![0; num_bytes];
+            for i in (0..num_bytes).step_by(dtype.num_bytes()) {
+                value.store(&mut buf[i..]);
+            }
+            BytesPtr::Cpu(buf)
+        }
         Device::Cuda(ordinal) => {
             let cuda = crate::util::thread_cuda(ordinal);
-            BytesPtr::Cuda(cuda.htod_copy(init_buf)?)
+            let module_name = std::format!("full{}{}", dtype.short_name(), value.to_string());
+            let ty = dtype.cuda_type_name();
+            let v = value.to_string();
+            if !cuda.has_func(&module_name, "kernel") {
+                let kernel_src = std::format!(
+                    r#"
+typedef unsigned char uint8_t;
+#include "cuda_fp16.h"
+
+extern "C" __global__ void kernel(const size_t *info, uint8_t *buf) {{
+    const size_t numel = info[0];
+    const size_t byte_stride = info[1];
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {{
+        *reinterpret_cast<{ty} *>(buf + i * byte_stride) = {v};
+    }}
+}}
+"#
+                );
+                let ptx = jit_compile(kernel_src)?;
+                cuda.load_ptx(ptx, &module_name, &["kernel"])?;
+            }
+            let mut buf = unsafe { cuda.alloc(num_bytes) }?;
+            let fwd_fn = cuda.get_func(&module_name, "kernel").unwrap();
+            let info = cuda.htod_copy(vec![numel, dtype.num_bytes()])?;
+            unsafe { fwd_fn.launch(launch_cfg::<128>(numel as u32), (&info, &mut buf)) }?;
+
+            BytesPtr::Cuda(buf)
         }
     };
 

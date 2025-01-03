@@ -6,7 +6,7 @@ impl Tensor {
         let mut y = self.defer_op_with_args(
             std::format!("lt_{}", scalar.to_string()),
             (|x, args| Scalar::Boolean(*x < args[1]), vec![scalar]),
-            std::format!("x < {}", scalar.to_string()),
+            std::format!("bool $x1 = $x < {}", scalar.to_string()),
         );
         y.deferred_dtype = Dtype::Boolean;
         y.gradient = None;

@@ -3,7 +3,7 @@ use std::{
     rc::Rc,
 };
 
-use cudarc::{driver::LaunchAsync, nvrtc::compile_ptx};
+use cudarc::driver::LaunchAsync;
 
 use crate::{tensor::*, util::*};
 
@@ -26,7 +26,7 @@ impl Tensor {
 
         let x_prog_name = self.build_op_name();
         let x_cpu_prog = self.build_cpu_op();
-        let x_cuda_prog = self.build_cuda_op();
+        let x_cuda_prog = self.build_cuda_op("x", "xf");
         self.deferred_ops.clear();
 
         let x_storage_dtype = self.stored_dtype;
@@ -64,7 +64,7 @@ impl Tensor {
                 let y_buf_ty = other.stored_dtype.cuda_type_name();
                 let dst_ty = dtype.cuda_type_name();
                 let x_prog = x_cuda_prog;
-                let y_prog = other.build_cuda_op();
+                let y_prog = other.build_cuda_op("y", "yf");
 
                 let cuda = y_buf.device();
 
@@ -78,6 +78,7 @@ impl Tensor {
                 if !cuda.has_func(&module_name, "kernel") {
                     let kernel_src = std::format!(
                         r#"
+typedef unsigned char uint8_t;
 #include "cuda_fp16.h"
 
 extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const uint8_t *rhs) {{
@@ -90,27 +91,23 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const 
         size_t tmp_i = i;
         size_t lhs_i = 0;
         size_t rhs_i = 0;
-        for (size_t d = num_dims - 1; d >= 0; d--) {{
+        for (int d = num_dims - 1; d >= 0; d--) {{
             size_t i_dim = tmp_i % dims[d];
             lhs_i += i_dim * lhs_strides[d];
             rhs_i += i_dim * rhs_strides[d];
             tmp_i /= dims[d];
         }}
 
-        auto x = *static_cast<{x_buf_ty} *>(lhs + lhs_i);
+        auto x = *reinterpret_cast<{x_buf_ty} *>(lhs + lhs_i);
         {x_prog}
-        auto lhs = x;
-
-        auto x = *static_cast<{y_buf_ty} *>(rhs + rhs_i);
+        auto y = *reinterpret_cast<const {y_buf_ty} *>(rhs + rhs_i);
         {y_prog}
-        auto rhs = x;
-
-        *static_cast<{dst_ty} *>(lhs + lhs_i) = lhs + rhs;
+        *reinterpret_cast<{dst_ty} *>(lhs + lhs_i) = xf + yf;
     }}
 }}
 "#
                     );
-                    let ptx = compile_ptx(kernel_src).unwrap();
+                    let ptx = jit_compile(kernel_src)?;
                     cuda.load_ptx(ptx, &module_name, &["kernel"])?;
                 }
 

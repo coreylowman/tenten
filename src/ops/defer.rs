@@ -1,8 +1,8 @@
 use std::{ops::DerefMut, rc::Rc};
 
-use cudarc::{driver::LaunchAsync, nvrtc::compile_ptx};
+use cudarc::driver::LaunchAsync;
 
-use crate::{tensor::*, util::launch_cfg};
+use crate::{tensor::*, util::*};
 
 impl Tensor {
     #[inline(always)]
@@ -62,16 +62,26 @@ impl Tensor {
     }
 
     #[inline]
-    pub fn build_cuda_op(&self) -> String {
-        let mut prog = String::new();
+    pub fn build_cuda_op(&self, var: &str, dst: &str) -> String {
+        let mut idx = 0;
+        let mut cur_var = std::format!("{var}{idx}");
+        let mut prog = std::format!("auto {cur_var} = {var};\n");
         for op in self.deferred_ops.iter() {
-            if op.cuda_op.contains("=") {
-                // for when the type changes
-                prog += &std::format!("{};\n", op.cuda_op);
+            assert!(op.cuda_op.contains("$x"));
+            if op.cuda_op.contains("$x1 =") {
+                idx += 1;
+                let new_var = std::format!("{var}{idx}");
+                prog += &op.cuda_op.replace("$x1", &new_var).replace("$x", &cur_var);
+                prog += ";\n";
+                cur_var = new_var;
             } else {
-                prog += &std::format!("x = {};\n", op.cuda_op);
+                prog += &cur_var;
+                prog += " = ";
+                prog += &op.cuda_op.replace("$x", &cur_var);
+                prog += ";\n";
             }
         }
+        prog += &std::format!("auto {dst} = {var}{idx};\n");
         prog
     }
 
@@ -89,7 +99,7 @@ impl Tensor {
 
         let prog_name = self.build_op_name();
         let cpu_prog = self.build_cpu_op();
-        let cuda_prog = self.build_cuda_op();
+        let cuda_prog = self.build_cuda_op("x", "xf");
 
         match Rc::make_mut(&mut self.bytes).borrow_mut().deref_mut() {
             BytesPtr::Cpu(buf) => {
@@ -108,19 +118,20 @@ impl Tensor {
                 if !cuda.has_func(&module_name, "kernel") {
                     let kernel_src = std::format!(
                         r#"
+typedef unsigned char uint8_t;
 #include "cuda_fp16.h"
 extern "C" __global__ void kernel(const size_t *info, uint8_t *buf) {{
     const size_t numel = info[0];
     const size_t byte_stride = info[1];
     for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {{
-        auto x = *static_cast<{src_ty} *>(buf + i * byte_stride);
+        auto x = *reinterpret_cast<{src_ty} *>(buf + i * byte_stride);
         {cuda_prog}
-        *static_cast<{dst_ty} *>(buf + i * byte_stride) = x;
+        *reinterpret_cast<{dst_ty} *>(buf + i * byte_stride) = xf;
     }}
 }}
 "#
                     );
-                    let ptx = compile_ptx(kernel_src).unwrap();
+                    let ptx = jit_compile(kernel_src)?;
                     cuda.load_ptx(ptx, &module_name, &["kernel"])?;
                 }
 

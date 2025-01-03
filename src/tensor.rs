@@ -164,6 +164,7 @@ impl Tensor {
 #[derive(Debug)]
 pub enum Error {
     CudaDriverError(cudarc::driver::DriverError),
+    CompilerError(cudarc::nvrtc::CompileError),
     CublasError(cudarc::cublas::result::CublasError),
     #[cfg(feature = "cudnn")]
     CudnnError(cudarc::cudnn::CudnnError),

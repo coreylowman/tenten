@@ -11,7 +11,7 @@ impl Tensor {
                     |a, args| f16::from_f32(a.as_f16().to_f32().powf(args[0].as_f32())).into(),
                     vec![Scalar::Float32(exponent as f32)],
                 ),
-                std::format!("__float2half(powf(__half2float(x), {exponent:?}))"),
+                std::format!("__float2half(powf(__half2float($x), {exponent:?}))"),
             ),
             Dtype::BFloat16 => self.defer_op_with_args(
                 std::format!("powbf16_{exponent:?}"),
@@ -19,7 +19,7 @@ impl Tensor {
                     |a, args| bf16::from_f32(a.as_bf16().to_f32().powf(args[0].as_f32())).into(),
                     vec![Scalar::Float32(exponent as f32)],
                 ),
-                std::format!("__float2half(powf(__half2float(x), {exponent:?}))"),
+                std::format!("__float2half(powf(__half2float($x), {exponent:?}))"),
             ),
             Dtype::Float32 => self.defer_op_with_args(
                 std::format!("powf32_{exponent:?}"),
@@ -27,7 +27,7 @@ impl Tensor {
                     |a, args| a.as_f32().powf(args[1].as_f32()).into(),
                     vec![Scalar::Float32(exponent as f32)],
                 ),
-                std::format!("powf(x, {exponent:?})"),
+                std::format!("powf($x, {exponent:?})"),
             ),
             Dtype::Float64 => self.defer_op_with_args(
                 std::format!("powf64_{exponent:?}"),
@@ -35,7 +35,7 @@ impl Tensor {
                     |a, args| a.as_f64().powf(args[1].as_f64()).into(),
                     vec![Scalar::Float64(exponent)],
                 ),
-                std::format!("pow(x, {exponent:?})"),
+                std::format!("pow($x, {exponent:?})"),
             ),
             _ => unimplemented!("Can't take pow of dtype={dtype:?}"),
         };

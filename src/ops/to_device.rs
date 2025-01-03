@@ -9,9 +9,7 @@ impl Tensor {
         if self.device() == device {
             Ok(self)
         } else {
-            let bytes = Rc::make_mut(&mut self.bytes);
-
-            *bytes.borrow_mut() = match bytes.borrow().deref() {
+            let new_bytes = match self.bytes.borrow().deref() {
                 &BytesPtr::Ghost(_, len) => BytesPtr::Ghost(device, len),
                 BytesPtr::Cpu(buf) => match device {
                     Device::Ghost => BytesPtr::Ghost(device, buf.len()),
@@ -29,6 +27,8 @@ impl Tensor {
                     }
                 },
             };
+
+            *Rc::make_mut(&mut self.bytes).borrow_mut() = new_bytes;
 
             Ok(self)
         }

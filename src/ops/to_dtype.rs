@@ -10,7 +10,7 @@ impl Tensor {
             let mut y: Tensor = self.defer_op_with_args(
                 std::format!("to{}", dst.short_name()),
                 (|x, args| x.to_dtype(args[0].dtype()), vec![dst.zero()]),
-                std::format!("{} x = x", dst.cuda_type_name()),
+                std::format!("{} $x1 = $x", dst.cuda_type_name()),
             );
             y.deferred_dtype = dst;
             if let Some([x_grad, y_grad]) = all_some([x.grad(), y.grad()]) {

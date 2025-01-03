@@ -1,6 +1,6 @@
 use std::ops::Deref;
 
-use cudarc::{driver::LaunchAsync, nvrtc::compile_ptx};
+use cudarc::driver::LaunchAsync;
 
 use crate::{init::build_tensor, tensor::*, util::*};
 
@@ -26,6 +26,7 @@ impl Tensor {
             let mut shape = self.shape.clone();
             shape.remove(ax);
             let strides = crate::init::nd_bytes_strides(&shape, dtype.num_bytes());
+            let x_numel = self.numel();
             let y_numel: usize = shape.iter().product();
             let y_byte_stride = dtype.num_bytes();
             let y_num_bytes = y_numel * y_byte_stride;
@@ -57,7 +58,7 @@ impl Tensor {
                 BytesPtr::Cuda(x_buf) => {
                     let cuda = x_buf.device();
 
-                    let prog = self.build_cuda_op();
+                    let prog = self.build_cuda_op("x", "xf");
                     let src_ty = self.stored_dtype.cuda_type_name();
                     let dst_ty = dtype.cuda_type_name();
 
@@ -71,7 +72,22 @@ impl Tensor {
                     if !cuda.has_func(&module_name, "kernel") {
                         let kernel_src = std::format!(
                             r#"
+typedef unsigned char uint8_t;
 #include "cuda_fp16.h"
+
+__device__ unsigned int get_strided_index(
+    size_t idx,
+    const size_t num_dims,
+    const size_t *dims,
+    const size_t *strides
+) {{
+    size_t strided_i = 0;
+    for (int d = num_dims - 1; d >= 0; d--) {{
+        strided_i += (idx % dims[d]) * strides[d];
+        idx /= dims[d];
+    }}
+    return strided_i;
+}}
 
 extern "C" __global__ void kernel(const size_t *info, const uint8_t *src, uint8_t *dst) {{
     const size_t src_numel = info[0];
@@ -95,21 +111,15 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *src, uint8_
     // Elements summed in this block range from dst_id * num_to_sum
     // to (dst_id + 1) * num_to_sum.
     size_t start_idx = dst_id * num_to_sum;
-    size_t stop_idx = min(start_idx + num_to_sum, src_numel);
+    size_t stop_idx = min((dst_id + 1) * num_to_sum, src_numel);
     size_t idx = start_idx + tid;
 
     while (idx < stop_idx) {{
         // TODO: Fast version for the contiguous case.
-        unsigned int strided_i = 0;
-        for (unsigned int d = 0; d < src_num_dims; d++) {{
-            unsigned int dim_idx = src_num_dims - 1 - d;
-            strided_i += (idx % src_dims[dim_idx]) * src_strides[dim_idx];
-            idx /= src_dims[dim_idx];
-        }}
-
-        auto x = *static_cast<{src_ty} *>(src + strided_i);
+        size_t i = get_strided_index(idx, src_num_dims, src_dims, src_strides);
+        auto x = *reinterpret_cast<const {src_ty} *>(src + i);
         {prog}
-        shr[tid] += x;
+        shr[tid] += xf;
 
         idx += blockDim.x;
     }}
@@ -125,12 +135,12 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *src, uint8_
     }}
 
     if (tid == 0) {{
-        *static_cast<{dst_ty} *>(dst + dst_id * dst_byte_stride) = shr[0];
+        *reinterpret_cast<{dst_ty} *>(dst + dst_id * dst_byte_stride) = shr[0];
     }}
 }}
 "#
                         );
-                        let ptx = compile_ptx(kernel_src).unwrap();
+                        let ptx = jit_compile(kernel_src)?;
                         cuda.load_ptx(ptx, &module_name, &["kernel"])?;
                     }
 
@@ -146,12 +156,14 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *src, uint8_
                     info.extend(&self.strides);
                     let info = cuda.htod_copy(info)?;
 
-                    unsafe {
-                        fwd_fn.launch(
-                            launch_cfg::<BLOCK_SIZE>(y_numel as u32),
-                            (&info, x_buf, &mut y_buf),
-                        )
-                    }?;
+                    let block_dim = usize::min(1024, num_to_sum).next_power_of_two();
+                    let cfg = cudarc::driver::LaunchConfig {
+                        grid_dim: (y_numel as u32, 1, 1),
+                        block_dim: (block_dim as u32, 1, 1),
+                        shared_mem_bytes: 0,
+                    };
+
+                    unsafe { fwd_fn.launch(cfg, (&info, x_buf, &mut y_buf)) }?;
 
                     BytesPtr::Cuda(y_buf)
                 }
@@ -178,11 +190,7 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *src, uint8_
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        init::{full, set_default_device, set_default_dtype},
-        tensor::*,
-        tests::*,
-    };
+    use crate::{init::*, tensor::*, tests::*};
 
     #[test]
     fn test_sum_along_contiguous() -> Result<(), Error> {
