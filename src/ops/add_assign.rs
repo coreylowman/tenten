@@ -1,4 +1,7 @@
-use std::ops::{Deref, DerefMut};
+use std::{
+    ops::{Deref, DerefMut},
+    rc::Rc,
+};
 
 use cudarc::{driver::LaunchAsync, nvrtc::compile_ptx};
 
@@ -30,8 +33,8 @@ impl Tensor {
         let shape = &self.shape;
 
         match (
-            self.bytes_ptr.borrow_mut().deref_mut(),
-            other.bytes_ptr.borrow().deref(),
+            Rc::make_mut(&mut self.bytes).borrow_mut().deref_mut(),
+            other.bytes.borrow().deref(),
         ) {
             (BytesPtr::Phantom, BytesPtr::Phantom) => (),
             (BytesPtr::Cpu(x_buf), BytesPtr::Cpu(y_buf)) => {

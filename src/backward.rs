@@ -81,7 +81,7 @@ impl Drop for NoGradGuard {
 
 impl Tensor {
     pub fn backward(self) -> Result<(), Error> {
-        assert!(self.shape().len() == 0);
+        assert!(self.shape().is_empty());
         let grad = self.grad().expect("Loss didn't have gradient");
         grad.alloc()?.fill_with(self.dtype().one())?;
         TAPE.with_borrow_mut(|tape| {

@@ -27,12 +27,11 @@ impl Tensor {
             let y_num_bytes = y_numel * dtype.num_bytes();
             let reduced_dim = self.shape[ax];
 
-            let bytes = match self.bytes_ptr.borrow().deref() {
+            let bytes = match self.bytes.borrow().deref() {
                 BytesPtr::Cpu(x_buf) => {
                     let prog = self.deferred_ops_cpu_closure();
 
-                    let mut y_buf = Vec::with_capacity(y_num_bytes);
-                    y_buf.resize(y_num_bytes, 0);
+                    let mut y_buf = vec![0; y_num_bytes];
 
                     let mut idx = CpuIndex::new(&self.shape, &self.strides, self.byte_stride);
 

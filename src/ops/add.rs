@@ -24,17 +24,13 @@ impl Tensor {
             let byte_stride = dtype.num_bytes();
             let z_strides = crate::init::nd_bytes_strides(shape, byte_stride);
 
-            let bytes = match (
-                self.bytes_ptr.borrow().deref(),
-                other.bytes_ptr.borrow().deref(),
-            ) {
+            let bytes = match (self.bytes.borrow().deref(), other.bytes.borrow().deref()) {
                 (BytesPtr::Phantom, BytesPtr::Phantom) => BytesPtr::Phantom,
                 (BytesPtr::Cpu(x_buf), BytesPtr::Cpu(y_buf)) => {
                     let x_prog = self.deferred_ops_cpu_closure();
                     let y_prog = other.deferred_ops_cpu_closure();
 
-                    let mut z_buf = Vec::with_capacity(tensor_num_bytes);
-                    z_buf.resize(tensor_num_bytes, 0);
+                    let mut z_buf = vec![0; tensor_num_bytes];
 
                     let mut x_idx = CpuIndex::new(shape, &self.strides, self.byte_stride);
                     let mut y_idx = CpuIndex::new(shape, &other.strides, other.byte_stride);

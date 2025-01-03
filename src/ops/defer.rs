@@ -13,7 +13,7 @@ impl Tensor {
             cuda_op: cuda_op.into(),
         });
         if let Some(grad) = self.gradient.as_mut() {
-            grad.bytes_ptr = Rc::new(RefCell::new(self.bytes_ptr.borrow().lazy()));
+            grad.bytes = Rc::new(RefCell::new(self.bytes.borrow().lazy()));
         }
         self
     }
@@ -31,7 +31,7 @@ impl Tensor {
             cuda_op: cuda_op.into(),
         });
         if let Some(grad) = self.gradient.as_mut() {
-            grad.bytes_ptr = Rc::new(RefCell::new(self.bytes_ptr.borrow().lazy()));
+            grad.bytes = Rc::new(RefCell::new(self.bytes.borrow().lazy()));
         }
         self
     }
@@ -76,7 +76,7 @@ impl Tensor {
     }
 
     pub fn undeferred(mut self) -> Result<Self, Error> {
-        if self.deferred_ops.len() == 0 {
+        if self.deferred_ops.is_empty() {
             return Ok(self);
         }
 
@@ -91,7 +91,7 @@ impl Tensor {
         let cpu_prog = self.deferred_ops_cpu_closure();
         let cuda_prog = self.deffered_ops_cuda_instructions();
 
-        match self.bytes_ptr.borrow_mut().deref_mut() {
+        match Rc::make_mut(&mut self.bytes).borrow_mut().deref_mut() {
             BytesPtr::Cpu(buf) => {
                 for i in (0..buf.len()).step_by(byte_stride) {
                     let value = stored_dtype.read(&buf[i..]);

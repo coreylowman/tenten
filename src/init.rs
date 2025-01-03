@@ -76,7 +76,7 @@ impl Drop for WithDeviceGuard {
 /// ```
 pub fn nd_bytes_strides(shape: &[usize], byte_stride: usize) -> Vec<usize> {
     let mut strides = Vec::with_capacity(shape.len());
-    if shape.len() == 0 {
+    if shape.is_empty() {
         return strides;
     }
 
@@ -104,7 +104,7 @@ pub fn build_tensor(
         deferred_dtype: dtype,
         shape: shape.clone(),
         strides: strides.clone(),
-        bytes_ptr: Rc::new(RefCell::new(bytes)),
+        bytes: Rc::new(RefCell::new(bytes)),
         byte_stride: dtype.num_bytes(),
         deferred_ops: Vec::new(),
         gradient: requires_grad.then(|| {
@@ -113,7 +113,7 @@ pub fn build_tensor(
                 deferred_dtype: dtype,
                 shape,
                 strides,
-                bytes_ptr: Rc::new(RefCell::new(lazy)),
+                bytes: Rc::new(RefCell::new(lazy)),
                 byte_stride: dtype.num_bytes(),
                 deferred_ops: Vec::new(),
                 gradient: None,
@@ -151,7 +151,7 @@ where
 
 pub fn zeros_like(x: &Tensor) -> Result<Tensor, Error> {
     let dtype = x.dtype();
-    let bytes = match x.bytes_ptr.borrow().deref() {
+    let bytes = match x.bytes.borrow().deref() {
         BytesPtr::Phantom => BytesPtr::Phantom,
         &BytesPtr::Lazy(Device::Phantom, _) => BytesPtr::Phantom,
         &BytesPtr::Lazy(Device::Cpu, len) => BytesPtr::Cpu(vec![0; len]),
@@ -202,7 +202,7 @@ where
 
 pub unsafe fn empty_like(x: &Tensor) -> Result<Tensor, Error> {
     let dtype = x.dtype();
-    let bytes = match x.bytes_ptr.borrow().deref() {
+    let bytes = match x.bytes.borrow().deref() {
         BytesPtr::Phantom => BytesPtr::Phantom,
         &BytesPtr::Lazy(dev, len) => BytesPtr::Lazy(dev, len),
         BytesPtr::Cpu(src) => BytesPtr::Cpu(vec![0; src.len()]),
@@ -495,7 +495,7 @@ impl Tensor {
         assert_eq!(dtype, dtype_of::<T>());
         let t = self.undeferred()?.to_device(Device::Cpu)?;
         let mut out = Vec::with_capacity(t.numel());
-        match t.bytes_ptr.borrow().deref() {
+        match t.bytes.borrow().deref() {
             BytesPtr::Cpu(buf) => {
                 let mut idx = CpuIndex::new(&t.shape, &t.strides, t.byte_stride);
                 for _ in 0..t.numel() {

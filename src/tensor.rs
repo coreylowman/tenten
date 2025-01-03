@@ -11,7 +11,7 @@ pub struct Tensor {
     pub(crate) shape: Vec<usize>,
     pub(crate) strides: Vec<usize>,
     pub(crate) byte_stride: usize,
-    pub(crate) bytes_ptr: Rc<RefCell<BytesPtr>>,
+    pub(crate) bytes: Rc<RefCell<BytesPtr>>,
     pub(crate) deferred_ops: Vec<DeferredOp>,
     pub(crate) gradient: Option<Box<Tensor>>,
 }
@@ -85,7 +85,7 @@ impl Tensor {
     }
 
     pub fn device(&self) -> Device {
-        match self.bytes_ptr.borrow().deref() {
+        match self.bytes.borrow().deref() {
             BytesPtr::Phantom => Device::Phantom,
             BytesPtr::Lazy(device, _) => *device,
             BytesPtr::Cpu(_) => Device::Cpu,
@@ -112,14 +112,14 @@ impl Tensor {
 
     pub fn set_new_grad(&mut self) -> Option<Tensor> {
         if let Some(grad) = self.gradient.as_mut() {
-            let bytes_ptr = self.bytes_ptr.borrow().lazy();
+            let bytes_ptr = self.bytes.borrow().lazy();
             *grad = Box::new(Tensor {
                 stored_dtype: self.deferred_dtype,
                 deferred_dtype: self.deferred_dtype,
                 shape: self.shape.clone(),
                 strides: self.strides.clone(),
                 byte_stride: self.byte_stride,
-                bytes_ptr: Rc::new(RefCell::new(bytes_ptr)),
+                bytes: Rc::new(RefCell::new(bytes_ptr)),
                 deferred_ops: Vec::new(),
                 gradient: None,
             })
@@ -128,7 +128,7 @@ impl Tensor {
     }
 
     pub fn alloc(self) -> Result<Self, Error> {
-        let maybe_alloc = match self.bytes_ptr.borrow().deref() {
+        let maybe_alloc = match self.bytes.borrow().deref() {
             &BytesPtr::Lazy(device, len) => Some((device, len)),
             _ => None,
         };
@@ -136,7 +136,7 @@ impl Tensor {
             Some((d, l)) => (d, l),
             None => return Ok(self),
         };
-        *self.bytes_ptr.borrow_mut() = match device {
+        *self.bytes.borrow_mut() = match device {
             Device::Phantom => BytesPtr::Phantom,
             Device::Cpu => BytesPtr::Cpu(vec![0u8; len]),
             Device::Cuda(ordinal) => {
@@ -148,7 +148,7 @@ impl Tensor {
     }
 
     pub fn is_same_as(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.bytes_ptr, &other.bytes_ptr) && self.deferred_ops == other.deferred_ops
+        Rc::ptr_eq(&self.bytes, &other.bytes) && self.deferred_ops == other.deferred_ops
     }
 }
 

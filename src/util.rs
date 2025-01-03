@@ -21,7 +21,7 @@ pub fn all_some<T, const N: usize>(arr: [Option<T>; N]) -> Option<[T; N]> {
 }
 
 pub(crate) fn launch_cfg<const NUM_THREADS: u32>(n: u32) -> cudarc::driver::LaunchConfig {
-    let num_blocks = (n + NUM_THREADS - 1) / NUM_THREADS;
+    let num_blocks = n.div_ceil(NUM_THREADS);
     cudarc::driver::LaunchConfig {
         grid_dim: (num_blocks, 1, 1),
         block_dim: (NUM_THREADS, 1, 1),
@@ -46,15 +46,15 @@ impl<'a> CpuIndex<'a> {
             indices: vec![0; shape.len()],
             shape,
             strides,
-            next: if shape.len() > 0 { Some(0) } else { None },
-            contiguous: (strides == &crate::init::nd_bytes_strides(shape, byte_stride))
+            next: if !shape.is_empty() { Some(0) } else { None },
+            contiguous: (strides == crate::init::nd_bytes_strides(shape, byte_stride))
                 .then(|| shape.iter().product::<usize>()),
             byte_stride,
         }
     }
 }
 
-impl<'a> CpuIndex<'a> {
+impl CpuIndex<'_> {
     pub(crate) fn get_strided_index(&self, mut idx: usize) -> usize {
         let mut out = 0;
 
@@ -128,14 +128,11 @@ thread_local!(pub static CUDA_INSTANCES: RefCell<HashMap<usize, Arc<CudaDevice>>
 pub(crate) fn thread_cuda(ordinal: usize) -> Arc<CudaDevice> {
     CUDA_INSTANCES.with(|t| {
         let mut instances = t.borrow_mut();
-        instances
-            .get(&ordinal)
-            .map(|v| v.clone())
-            .unwrap_or_else(|| {
-                let new_instance = CudaDevice::new(ordinal).unwrap();
-                instances.insert(ordinal, new_instance.clone());
-                new_instance
-            })
+        instances.get(&ordinal).cloned().unwrap_or_else(|| {
+            let new_instance = CudaDevice::new(ordinal).unwrap();
+            instances.insert(ordinal, new_instance.clone());
+            new_instance
+        })
     })
 }
 

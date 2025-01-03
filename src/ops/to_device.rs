@@ -7,7 +7,7 @@ impl Tensor {
         if self.device() == device {
             Ok(self)
         } else {
-            let bytes = Rc::make_mut(&mut self.bytes_ptr);
+            let bytes = Rc::make_mut(&mut self.bytes);
 
             *bytes.borrow_mut() = match bytes.borrow().deref() {
                 BytesPtr::Phantom => todo!(),
@@ -16,7 +16,7 @@ impl Tensor {
                     Device::Phantom => BytesPtr::Phantom,
                     Device::Cuda(ordinal) => {
                         let cuda = thread_cuda(ordinal);
-                        BytesPtr::Cuda(cuda.htod_sync_copy(&buf)?)
+                        BytesPtr::Cuda(cuda.htod_sync_copy(buf)?)
                     }
                     _ => unreachable!(),
                 },

@@ -1,4 +1,4 @@
-use crate::{tensor::*};
+use crate::tensor::*;
 
 impl Tensor {
     pub fn mean_along<A: Into<Axis>>(self, axis: A) -> Result<Self, Error> {

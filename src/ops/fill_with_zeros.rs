@@ -1,10 +1,10 @@
-use std::ops::DerefMut;
+use std::{ops::DerefMut, rc::Rc};
 
 use crate::tensor::*;
 
 impl Tensor {
     pub fn fill_with_zeros(&mut self) -> Result<(), Error> {
-        match self.bytes_ptr.borrow_mut().deref_mut() {
+        match Rc::make_mut(&mut self.bytes).borrow_mut().deref_mut() {
             BytesPtr::Phantom => (),
             BytesPtr::Lazy(_, _) => (),
             BytesPtr::Cpu(buf) => buf.fill(0),
