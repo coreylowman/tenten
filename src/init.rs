@@ -250,9 +250,6 @@ where
             if !cuda.has_func(&module_name, "kernel") {
                 let kernel_src = std::format!(
                     r#"
-typedef unsigned char uint8_t;
-#include "cuda_fp16.h"
-
 extern "C" __global__ void kernel(const size_t *info, uint8_t *buf) {{
     const size_t numel = info[0];
     const size_t byte_stride = info[1];

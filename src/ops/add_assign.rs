@@ -29,7 +29,7 @@ impl Tensor {
         let x_cuda_prog = self.build_cuda_op("x", "xf");
         self.deferred_ops.clear();
 
-        let x_storage_dtype = self.stored_dtype;
+        let x_stored_dtype = self.stored_dtype;
         let x_byte_stride = self.byte_stride;
         let x_strides = self.strides.clone();
         let shape = &self.shape;
@@ -49,7 +49,7 @@ impl Tensor {
                     let i_lhs = x_idx.next().unwrap();
                     let i_rhs = y_idx.next().unwrap();
 
-                    let x_i = x_storage_dtype.read(&x_buf[i_lhs..]);
+                    let x_i = x_stored_dtype.read(&x_buf[i_lhs..]);
                     let y_i = other.stored_dtype.read(&y_buf[i_rhs..]);
 
                     let x_i = x_prog(&x_i);
@@ -60,7 +60,7 @@ impl Tensor {
                 }
             }
             (BytesPtr::Cuda(x_buf), BytesPtr::Cuda(y_buf)) => {
-                let x_buf_ty = x_storage_dtype.cuda_type_name();
+                let x_buf_ty = x_stored_dtype.cuda_type_name();
                 let y_buf_ty = other.stored_dtype.cuda_type_name();
                 let dst_ty = dtype.cuda_type_name();
                 let x_prog = x_cuda_prog;
@@ -78,9 +78,6 @@ impl Tensor {
                 if !cuda.has_func(&module_name, "kernel") {
                     let kernel_src = std::format!(
                         r#"
-typedef unsigned char uint8_t;
-#include "cuda_fp16.h"
-
 extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const uint8_t *rhs) {{
     const size_t numel = info[0];
     const size_t num_dims = info[1];

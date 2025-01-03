@@ -67,9 +67,6 @@ impl Tensor {
                 if !cuda.has_func(&module_name, "kernel") {
                     let kernel_src = std::format!(
                         r#"
-typedef unsigned char uint8_t;
-#include "cuda_fp16.h"
-
 extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, const uint8_t *rhs, uint8_t *out) {{
     const size_t numel = info[0];
     const size_t num_dims = info[1];

@@ -1,5 +1,4 @@
-use std::borrow::{Borrow, BorrowMut};
-use std::cell::{OnceCell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -225,9 +224,23 @@ pub fn find_cuda_include_dir() -> &'static String {
     })
 }
 
-pub fn jit_compile(src: String) -> Result<Ptx, Error> {
+pub fn jit_compile(mut src: String) -> Result<Ptx, Error> {
     let arch = find_cuda_arch();
     let cuda_include_dir = find_cuda_include_dir();
+    src.insert_str(
+        0,
+        "
+#include \"cuda_fp16.h\"
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned int uint32_t;
+typedef unsigned long uint64_t;
+typedef signed char int8_t;
+typedef signed short int16_t;
+typedef signed int int32_t;
+typedef signed long int64_t;
+",
+    );
     let ptx = compile_ptx_with_opts(
         src,
         CompileOptions {

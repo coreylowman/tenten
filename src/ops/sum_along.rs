@@ -26,7 +26,6 @@ impl Tensor {
             let mut shape = self.shape.clone();
             shape.remove(ax);
             let strides = crate::init::nd_bytes_strides(&shape, dtype.num_bytes());
-            let x_numel = self.numel();
             let y_numel: usize = shape.iter().product();
             let y_byte_stride = dtype.num_bytes();
             let y_num_bytes = y_numel * y_byte_stride;
@@ -67,14 +66,11 @@ impl Tensor {
                     let module_name =
                         std::format!("{}sum{ax:?}{}", self.build_op_name(), dtype.short_name());
 
-                    const BLOCK_SIZE: u32 = 1024;
+                    const BLOCK_SIZE: usize = 1024;
 
                     if !cuda.has_func(&module_name, "kernel") {
                         let kernel_src = std::format!(
                             r#"
-typedef unsigned char uint8_t;
-#include "cuda_fp16.h"
-
 __device__ unsigned int get_strided_index(
     size_t idx,
     const size_t num_dims,
@@ -156,7 +152,7 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *src, uint8_
                     info.extend(&self.strides);
                     let info = cuda.htod_copy(info)?;
 
-                    let block_dim = usize::min(1024, num_to_sum).next_power_of_two();
+                    let block_dim = usize::min(BLOCK_SIZE, num_to_sum).next_power_of_two();
                     let cfg = cudarc::driver::LaunchConfig {
                         grid_dim: (y_numel as u32, 1, 1),
                         block_dim: (block_dim as u32, 1, 1),

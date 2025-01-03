@@ -5,7 +5,7 @@ impl Tensor {
         if self.is_same_as(&other) {
             Ok(self)
         } else {
-            // TODO we can optimize this with a special kernel
+            // TODO this results in multiple kernels being executed. optimize with a special kernel
             self.clone().ge(other.clone())?.choose(self, other)
         }
     }

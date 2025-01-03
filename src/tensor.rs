@@ -273,6 +273,44 @@ impl Dtype {
     }
 
     #[inline(always)]
+    pub fn min_value(&self) -> Scalar {
+        match self {
+            Dtype::Boolean => Scalar::Boolean(false),
+            Dtype::Float16 => Scalar::Float16(f16::MIN),
+            Dtype::BFloat16 => Scalar::BFloat16(bf16::MIN),
+            Dtype::Float32 => Scalar::Float32(f32::MIN),
+            Dtype::Float64 => Scalar::Float64(f64::MIN),
+            Dtype::Int8 => Scalar::Int8(i8::MIN),
+            Dtype::Int16 => Scalar::Int16(i16::MIN),
+            Dtype::Int32 => Scalar::Int32(i32::MIN),
+            Dtype::Int64 => Scalar::Int64(i64::MIN),
+            Dtype::UInt8 => Scalar::UInt8(u8::MIN),
+            Dtype::UInt16 => Scalar::UInt16(u16::MIN),
+            Dtype::UInt32 => Scalar::UInt32(u32::MIN),
+            Dtype::UInt64 => Scalar::UInt64(u64::MIN),
+        }
+    }
+
+    #[inline(always)]
+    pub fn max_value(&self) -> Scalar {
+        match self {
+            Dtype::Boolean => Scalar::Boolean(false),
+            Dtype::Float16 => Scalar::Float16(f16::MAX),
+            Dtype::BFloat16 => Scalar::BFloat16(bf16::MAX),
+            Dtype::Float32 => Scalar::Float32(f32::MAX),
+            Dtype::Float64 => Scalar::Float64(f64::MAX),
+            Dtype::Int8 => Scalar::Int8(i8::MAX),
+            Dtype::Int16 => Scalar::Int16(i16::MAX),
+            Dtype::Int32 => Scalar::Int32(i32::MAX),
+            Dtype::Int64 => Scalar::Int64(i64::MAX),
+            Dtype::UInt8 => Scalar::UInt8(u8::MAX),
+            Dtype::UInt16 => Scalar::UInt16(u16::MAX),
+            Dtype::UInt32 => Scalar::UInt32(u32::MAX),
+            Dtype::UInt64 => Scalar::UInt64(u64::MAX),
+        }
+    }
+
+    #[inline(always)]
     pub fn zero(&self) -> Scalar {
         match self {
             Dtype::Boolean => Scalar::Boolean(false),
