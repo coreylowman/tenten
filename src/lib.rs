@@ -29,10 +29,11 @@ pub(crate) mod tests {
     #[cfg(feature = "test-cuda")]
     pub const TEST_DEVICE: Device = Device::Cuda(0);
 
-    pub const RTOL: TestDtype = 1e-5;
-    pub const ATOL: TestDtype = 1e-8;
+    pub const RTOL: f32 = 1e-5;
+    pub const ATOL: f32 = 1e-8;
 
-    pub fn assert_all_close(a: &[TestDtype], b: &[TestDtype]) -> Result<(), crate::tensor::Error> {
+    pub fn assert_all_close(a: &[f32], b: &[f32]) -> Result<(), crate::tensor::Error> {
+        assert_eq!(a.len(), b.len());
         for (x, y) in a.iter().zip(b.iter()) {
             let close = if x.is_nan() {
                 y.is_nan()

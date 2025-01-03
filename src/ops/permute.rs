@@ -27,7 +27,7 @@ impl Tensor {
         let mut new_strides = self.strides.clone();
         for (i, new_dim) in order.iter().enumerate() {
             let new_dim = new_dim.rem_euclid(num_dims as isize) as usize;
-            new_strides[i] = new_dim;
+            new_strides[i] = self.strides[new_dim];
             new_shape[i] = self.shape[new_dim];
         }
 

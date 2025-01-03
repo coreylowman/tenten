@@ -10,13 +10,16 @@ impl Tensor {
         let ax = axis.to_usize(self.shape.len());
         let x = self.clone();
         let y = if self.shape[ax] == 1 {
+            self.id = monotonically_increasing_id();
             self.shape.remove(ax);
             self.strides.remove(ax);
+            self.set_new_grad();
             self
         } else if self.strides[ax] == 0 {
+            self.id = monotonically_increasing_id();
             let scale = self.shape.remove(ax);
             self.strides.remove(ax);
-            // TODO does this work properly with deferred ops?
+            self.set_new_grad();
             self.mul_scalar(scale)?
         } else {
             let dtype = self.deferred_dtype;
@@ -24,8 +27,9 @@ impl Tensor {
             shape.remove(ax);
             let strides = crate::init::nd_bytes_strides(&shape, dtype.num_bytes());
             let y_numel: usize = shape.iter().product();
-            let y_num_bytes = y_numel * dtype.num_bytes();
-            let reduced_dim = self.shape[ax];
+            let y_byte_stride = dtype.num_bytes();
+            let y_num_bytes = y_numel * y_byte_stride;
+            let num_to_sum = self.shape[ax];
 
             let bytes = match self.bytes.borrow().deref() {
                 BytesPtr::Cpu(x_buf) => {
@@ -38,7 +42,7 @@ impl Tensor {
                     for i_y in (0..y_num_bytes).step_by(dtype.num_bytes()) {
                         // TODO do accumulation in f32 for f16/bf16
                         let mut y = dtype.zero();
-                        for _ in 0..reduced_dim {
+                        for _ in 0..num_to_sum {
                             let i_x = idx.next().unwrap();
                             let x = self.stored_dtype.read(&x_buf[i_x..]);
                             y = y + prog(&x);
@@ -54,7 +58,7 @@ impl Tensor {
                     let cuda = x_buf.device();
 
                     let prog = self.build_cuda_op();
-                    let x_buf_ty = self.stored_dtype.cuda_type_name();
+                    let src_ty = self.stored_dtype.cuda_type_name();
                     let dst_ty = dtype.cuda_type_name();
 
                     let mut y_buf = cuda.alloc_zeros(y_num_bytes)?;
@@ -62,22 +66,66 @@ impl Tensor {
                     let module_name =
                         std::format!("{}sum{ax:?}{}", self.build_op_name(), dtype.short_name());
 
+                    const BLOCK_SIZE: u32 = 1024;
+
                     if !cuda.has_func(&module_name, "kernel") {
                         let kernel_src = std::format!(
                             r#"
 #include "cuda_fp16.h"
 
-extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, uint8_t *out) {{
-    const size_t numel = info[0];
-    const size_t num_dims = info[1];
-    const size_t byte_stride = info[2];
-    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) {{
-        auto x = *static_cast<{x_buf_ty} *>(lhs + i);
+extern "C" __global__ void kernel(const size_t *info, const uint8_t *src, uint8_t *dst) {{
+    const size_t src_numel = info[0];
+    const size_t dst_numel = info[1];
+    const size_t num_to_sum = info[2];
+    const size_t dst_byte_stride = info[3];
+    const size_t src_num_dims = info[4];
+    const size_t *src_dims = info + 5;
+    const size_t *src_strides = info + 5 + src_num_dims;
+
+    __shared__ {dst_ty} shr[{BLOCK_SIZE}];
+    size_t tid = threadIdx.x;
+    size_t dst_id = blockIdx.x;
+
+    if (dst_id >= dst_numel) {{
+        return;
+    }}
+
+    shr[tid] = 0;
+
+    // Elements summed in this block range from dst_id * num_to_sum
+    // to (dst_id + 1) * num_to_sum.
+    size_t start_idx = dst_id * num_to_sum;
+    size_t stop_idx = min(start_idx + num_to_sum, src_numel);
+    size_t idx = start_idx + tid;
+
+    while (idx < stop_idx) {{
+        // TODO: Fast version for the contiguous case.
+        unsigned int strided_i = 0;
+        for (unsigned int d = 0; d < src_num_dims; d++) {{
+            unsigned int dim_idx = src_num_dims - 1 - d;
+            strided_i += (idx % src_dims[dim_idx]) * src_strides[dim_idx];
+            idx /= src_dims[dim_idx];
+        }}
+
+        auto x = *static_cast<{src_ty} *>(src + strided_i);
         {prog}
+        shr[tid] += x;
 
-        TODO do sum
+        idx += blockDim.x;
+    }}
 
-        *static_cast<{dst_ty} *>(out + i * byte_stride) = x;
+    // Parallel reduction, see the slides:
+    // https://www.olcf.ornl.gov/wp-content/uploads/2019/12/05_Atomics_Reductions_Warp_Shuffle.pdf
+    // https://stackoverflow.com/questions/66078814/is-cuda-atomicadd-operation-faster-than-launch-another-kernel-when-we-do-reduce
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        __syncthreads();
+        if (tid < s) {{
+            shr[tid] += shr[tid + s];
+        }}
+    }}
+
+    if (tid == 0) {{
+        *static_cast<{dst_ty} *>(dst + dst_id * dst_byte_stride) = shr[0];
     }}
 }}
 "#
@@ -89,12 +137,18 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, uint8_
                     let fwd_fn = cuda.get_func(&module_name, "kernel").unwrap();
 
                     let mut info = Vec::new();
+                    info.push(self.numel());
                     info.push(y_numel);
+                    info.push(num_to_sum);
+                    info.push(y_byte_stride);
+                    info.push(self.shape.len());
+                    info.extend(&self.shape);
+                    info.extend(&self.strides);
                     let info = cuda.htod_copy(info)?;
 
                     unsafe {
                         fwd_fn.launch(
-                            launch_cfg::<128>(y_numel as u32),
+                            launch_cfg::<BLOCK_SIZE>(y_numel as u32),
                             (&info, x_buf, &mut y_buf),
                         )
                     }?;
@@ -119,5 +173,111 @@ extern "C" __global__ void kernel(const size_t *info, const uint8_t *lhs, uint8_
             });
         }
         Ok(y)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        init::{full, set_default_device, set_default_dtype},
+        tensor::*,
+        tests::*,
+    };
+
+    #[test]
+    fn test_sum_along_contiguous() -> Result<(), Error> {
+        set_default_device(TEST_DEVICE);
+        let x = Tensor::from([
+            [1.0f32, 2.0, 3.0, 4.0, 5.0],
+            [-1.0, 2.0, -3.0, 4.0, -5.0],
+            [1.0, -2.0, 3.0, -4.0, 5.0],
+        ]);
+
+        let y = x
+            .to_dtype(TEST_DTYPE)?
+            .sum_along(-1)?
+            .to_dtype(Dtype::Float32)?;
+
+        assert_eq!(y.shape, [3]);
+
+        assert_all_close(&y.into_vec()?, &[15.0, -3.0, 3.0])
+    }
+
+    #[test]
+    fn test_sum_along_broadcasted() -> Result<(), Error> {
+        set_default_device(TEST_DEVICE);
+
+        let x = Tensor::from([1.0f32, 2.0, 3.0, 4.0, 5.0]);
+
+        let y = x
+            .to_dtype(TEST_DTYPE)?
+            .broadcast_along(-1, 3)?
+            .sum_along(-1)?
+            .to_dtype(Dtype::Float32)?;
+
+        assert_eq!(y.shape, [5]);
+
+        assert_all_close(&y.into_vec()?, &[3.0, 6.0, 9.0, 12.0, 15.0])
+    }
+
+    #[test]
+    fn test_sum_along_permuted() -> Result<(), Error> {
+        set_default_device(TEST_DEVICE);
+
+        let x = Tensor::from([
+            [1.0f32, 2.0, 3.0, 4.0, 5.0],
+            [-1.0, 2.0, -3.0, 4.0, -5.0],
+            [1.0, -2.0, 3.0, -4.0, 5.0],
+        ]);
+
+        let y = x
+            .to_dtype(TEST_DTYPE)?
+            .permute([1, 0])?
+            .sum_along(-1)?
+            .to_dtype(Dtype::Float32)?;
+
+        assert_eq!(y.shape, [5]);
+
+        assert_all_close(&y.into_vec()?, &[1.0, 2.0, 3.0, 4.0, 5.0])
+    }
+
+    #[test]
+    fn test_sum_along_smaller_than_block_size() -> Result<(), Error> {
+        set_default_device(TEST_DEVICE);
+
+        let x = full([256, 512], TEST_DTYPE.one())?;
+
+        assert_all_close(
+            &x.clone()
+                .sum_along(0)?
+                .to_dtype(Dtype::Float32)?
+                .into_vec()?,
+            &[256.0; 512],
+        )?;
+
+        assert_all_close(
+            &x.sum_along(1)?.to_dtype(Dtype::Float32)?.into_vec()?,
+            &[512.0; 256],
+        )
+    }
+
+    #[test]
+    fn test_sum_along_larger_than_block_size() -> Result<(), Error> {
+        set_default_device(TEST_DEVICE);
+
+        let x = full([1024, 2048], TEST_DTYPE.one())?;
+
+        assert_all_close(
+            &x.clone()
+                .sum_along(0)?
+                .to_dtype(Dtype::Float32)?
+                .into_vec()?,
+            &[1024.0; 2048],
+        )?;
+
+        assert_all_close(
+            &x.sum_along(1)?.to_dtype(Dtype::Float32)?.into_vec()?,
+            &[2048.0; 1024],
+        )
     }
 }
